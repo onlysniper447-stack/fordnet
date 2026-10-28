@@ -12,7 +12,8 @@ export interface ZcashRpc {
   readonly mocked: boolean;
   getBlockchainInfo(): Promise<RpcBlockchainInfo>;
   getBlockHash(height: number): Promise<string>;
-  getBlock(hashOrHeight: string): Promise<RpcBlock | null>;
+  getBlock(hashOrHeight: string, verbosity?: 1 | 2): Promise<RpcBlock | null>;
+  getAddressTxids(addr: string): Promise<string[] | null>;
   getMiningInfo(): Promise<RpcMiningInfo>;
   getNetworkSolPs(): Promise<number | null>;
   getRawTransaction(txid: string): Promise<RpcTx | null>;
@@ -63,12 +64,17 @@ export class HttpRpcClient implements ZcashRpc {
   }
   getBlockchainInfo() { return this.call<RpcBlockchainInfo>("getblockchaininfo"); }
   getBlockHash(h: number) { return this.call<string>("getblockhash", [h]); }
-  getBlock(id: string) { return this.nullOnNotFound(this.call<RpcBlock>("getblock", [id, 2])); }
+  async getBlock(id: string, verbosity: 1 | 2 = 2) {
+    const b = await this.nullOnNotFound(this.call<RpcBlock>("getblock", [id, verbosity]));
+    if (b && verbosity === 2) for (const t of b.tx as (RpcTx & { hex?: string })[]) delete t.hex; // drop raw hex: big, not displayed
+    return b;
+  }
   getMiningInfo() { return this.call<RpcMiningInfo>("getmininginfo"); }
   async getNetworkSolPs() { try { return await this.call<number>("getnetworksolps"); } catch { return null; } }
   getRawTransaction(txid: string) { return this.nullOnNotFound(this.call<RpcTx>("getrawtransaction", [txid, 1])); }
   // Address index RPCs need zcashd -insightexplorer / -lightwalletd; null => "not reported".
   async getAddressBalance(a: string) { try { return await this.call<RpcAddressBalance>("getaddressbalance", [{ addresses: [a] }]); } catch { return null; } }
+  async getAddressTxids(a: string) { try { return await this.call<string[]>("getaddresstxids", [{ addresses: [a] }]); } catch { return null; } }
   async getAddressDeltas(a: string) { try { return await this.call<RpcAddressDelta[]>("getaddressdeltas", [{ addresses: [a] }]); } catch { return null; } }
 }
 
@@ -88,6 +94,7 @@ export class MockRpcClient implements ZcashRpc {
   async getRawTransaction(txid: string) { return mock.mockTx(txid); }
   async getAddressBalance(a: string) { return mock.mockAddressBalance(a); }
   async getAddressDeltas(a: string) { return mock.mockAddressDeltas(a); }
+  async getAddressTxids(a: string) { return mock.mockAddressDeltas(a).map((d) => d.txid); }
 }
 
 let client: ZcashRpc | null = null;

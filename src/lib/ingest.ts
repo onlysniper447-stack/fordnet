@@ -6,7 +6,10 @@ import type { NetworkStatus, RpcBlock, SyncState } from "./types";
 
 const BLOCKS_PER_DAY = 1152; // 75s target spacing
 const KEEP_BLOCKS = 100;
-const BACKFILL_DAYS = 90;
+// Shared-tier RPC providers rate-limit; keep calls per run bounded.
+const BACKFILL_DAYS = Number(process.env.POOL_BACKFILL_DAYS ?? 30);
+const MAX_BACKFILL_PER_RUN = Number(process.env.POOL_BACKFILL_PER_RUN ?? 10);
+const MAX_NEW_BLOCKS_PER_RUN = Number(process.env.MAX_NEW_BLOCKS_PER_RUN ?? (process.env.VERCEL ? 30 : 100));
 
 export function syncState(lastBlockTime: number | null, height: number | null, headers: number | null, nowMs = Date.now()): SyncState {
   if (height === null || lastBlockTime === null) return "unreachable";
@@ -53,6 +56,7 @@ async function doIngest(): Promise<IngestResult> {
     if (!b) continue;
     if (h === tip) tipBlock = b;
     if (!existing || existing.hash !== b.hash) { storeBlock(b); newBlocks++; }
+    if (newBlocks >= MAX_NEW_BLOCKS_PER_RUN) break; // remaining history fills on later runs
   }
   db.delete(schema.blocks).where(sql`${schema.blocks.height} <= ${tip - KEEP_BLOCKS * 5}`).run();
   tipBlock ??= await rpc.getBlock(String(tip));
@@ -75,10 +79,10 @@ async function doIngest(): Promise<IngestResult> {
   const have = new Set(db.select({ d: schema.poolSnapshots.date }).from(schema.poolSnapshots).all().map((r) => r.d));
   for (let d = 1; d <= BACKFILL_DAYS; d++) {
     const h = tip - d * BLOCKS_PER_DAY;
-    if (h < 0) break;
+    if (h < 0 || poolDaysWritten > MAX_BACKFILL_PER_RUN) break;
     const approxDate = utcDate(now / 1000 - d * 86400);
     if (have.has(approxDate)) continue;
-    const b = await rpc.getBlock(String(h)).catch(() => null);
+    const b = await rpc.getBlock(String(h), 1).catch(() => null);
     if (!b || have.has(utcDate(b.time))) continue;
     storePoolDay(b, now); have.add(utcDate(b.time)); poolDaysWritten++;
   }

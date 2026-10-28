@@ -24,6 +24,7 @@ export const poolSnapshots = sqliteTable("pool_snapshots", {
   sapling: real("sapling"),
   orchard: real("orchard"),
   lockbox: real("lockbox"),
+  ironwood: real("ironwood"),
 });
 
 export const apiKeys = sqliteTable("api_keys", {

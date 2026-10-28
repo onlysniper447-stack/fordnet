@@ -5,13 +5,20 @@ import { ensureFresh, latestSnapshot, syncState } from "./ingest";
 import { poolsFrom } from "./pools";
 import type { AddressInfo, BlockDetail, BlockSummary, NetworkStatus, PoolPoint, PoolRange, RpcBlock, RpcTx, TxDetail, TxSummary } from "./types";
 
-const EMPTY_POOLS = { transparent: null, sprout: null, sapling: null, orchard: null, lockbox: null };
+const EMPTY_POOLS = { transparent: null, sprout: null, sapling: null, orchard: null, lockbox: null, ironwood: null };
 
+let statusCache: { at: number; v: NetworkStatus } | null = null;
 export async function getNetworkStatus(): Promise<NetworkStatus> {
+  if (statusCache && Date.now() - statusCache.at < 15_000) return statusCache.v;
+  const v = await fetchNetworkStatus();
+  if (v.live) statusCache = { at: Date.now(), v };
+  return v;
+}
+async function fetchNetworkStatus(): Promise<NetworkStatus> {
   const rpc = getRpc();
   try {
     const [info, solps] = await Promise.all([rpc.getBlockchainInfo(), rpc.getNetworkSolPs()]);
-    const tip = await rpc.getBlock(String(info.blocks));
+    const tip = await rpc.getBlock(String(info.blocks), 1);
     void ensureFresh();
     return {
       state: syncState(tip?.time ?? null, info.blocks, info.headers ?? null), live: true, mocked: rpc.mocked,
@@ -73,10 +80,21 @@ export async function getTxDetail(txid: string): Promise<TxDetail | null> {
 export async function getAddressInfo(address: string): Promise<AddressInfo> {
   const rpc = getRpc();
   const [bal, deltas] = await Promise.all([rpc.getAddressBalance(address), rpc.getAddressDeltas(address)]);
+  let txs: AddressInfo["txs"] = deltas ? [...deltas].sort((a, b) => b.height - a.height).slice(0, 25).map((d) => ({ txid: d.txid, height: d.height, deltaZec: d.satoshis / 1e8 })) : null;
+  if (!deltas) {
+    // Zebra: no getaddressdeltas. Use getaddresstxids + getrawtransaction for the 10 most recent (delta not reported).
+    const ids = await rpc.getAddressTxids(address);
+    if (ids) {
+      const recent = ids.slice(-10).reverse();
+      const raws = await Promise.all(recent.map((id) => rpc.getRawTransaction(id).catch(() => null)));
+      txs = recent.map((txid, i) => ({ txid, height: raws[i]?.height ?? null, deltaZec: null }));
+      txs.sort((a, b) => (b.height ?? 0) - (a.height ?? 0));
+    }
+  }
   return {
-    address, indexAvailable: bal !== null || deltas !== null,
+    address, indexAvailable: bal !== null || txs !== null,
     balanceZec: bal ? bal.balance / 1e8 : null, receivedZec: bal ? bal.received / 1e8 : null,
-    txs: deltas ? [...deltas].sort((a, b) => b.height - a.height).slice(0, 25).map((d) => ({ txid: d.txid, height: d.height, deltaZec: d.satoshis / 1e8 })) : null,
+    txs,
   };
 }
 
@@ -86,7 +104,7 @@ export async function getPoolHistory(range: PoolRange): Promise<{ points: PoolPo
   const since = range === "all" ? "0000-00-00" : new Date(Date.now() - (range === "7d" ? 7 : 30) * 86400_000).toISOString().slice(0, 10);
   const rows = db.select().from(schema.poolSnapshots).where(gte(schema.poolSnapshots.date, since)).orderBy(schema.poolSnapshots.date).all();
   return {
-    points: rows.map((r) => ({ date: r.date, height: r.height, transparent: r.transparent, sprout: r.sprout, sapling: r.sapling, orchard: r.orchard, lockbox: r.lockbox })),
+    points: rows.map((r) => ({ date: r.date, height: r.height, transparent: r.transparent, sprout: r.sprout, sapling: r.sapling, orchard: r.orchard, lockbox: r.lockbox, ironwood: r.ironwood })),
     updatedAt: rows.reduce<number | null>((m, r) => (m === null || r.takenAt > m ? r.takenAt : m), null),
   };
 }

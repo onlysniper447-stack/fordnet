@@ -11,6 +11,7 @@ const SERIES = [
   { key: "sprout", label: "Sprout (shielded)", color: "#B58CFF" },
   { key: "transparent", label: "Transparent", color: "#8FA39A" },
   { key: "lockbox", label: "Lockbox", color: "#E0B84A" },
+  { key: "ironwood", label: "Ironwood", color: "#FF8FB1" },
 ] as const;
 type SeriesKey = (typeof SERIES)[number]["key"];
 
@@ -71,7 +72,7 @@ export function PoolChart({ points, updatedAt, source }: { points: PoolPoint[]; 
             <AreaChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
               <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
               <XAxis dataKey="date" tick={{ fontSize: 11, fill: "var(--muted)" }} tickFormatter={(d: string) => d.slice(5)} minTickGap={24} />
-              <YAxis width={44} tick={{ fontSize: 11, fill: "var(--muted)" }} tickFormatter={(v: number) => `${(v / 1e6).toFixed(1)}M`} />
+              <YAxis width={44} tick={{ fontSize: 11, fill: "var(--muted)" }} tickFormatter={(v: number) => (v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : `${Math.round(v / 1e3)}k`)} />
               <Tooltip content={(p) => <TipBox {...(p as TooltipContentProps<number, string>)} />} />
               {shown.map((s) => <Area key={s.key} type="monotone" dataKey={s.key} stackId="1" stroke={s.color} fill={s.color} fillOpacity={0.35} isAnimationActive={!reduced} connectNulls={false} />)}
             </AreaChart>

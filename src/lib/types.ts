@@ -88,6 +88,7 @@ export interface PoolValues {
   sapling: number | null;
   orchard: number | null;
   lockbox: number | null;
+  ironwood: number | null;
 }
 
 export interface NetworkStatus {
@@ -150,7 +151,7 @@ export interface AddressInfo {
   address: string;
   balanceZec: number | null;
   receivedZec: number | null;
-  txs: { txid: string; height: number; deltaZec: number }[] | null;
+  txs: { txid: string; height: number | null; deltaZec: number | null }[] | null;
   indexAvailable: boolean;
 }
 

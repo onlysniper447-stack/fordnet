@@ -26,9 +26,9 @@ export default async function AddressPage({ params }: { params: Promise<{ taddr:
       <Card className="p-0">
         {a.txs === null ? <p className="p-4 text-sm text-muted">Not reported by this node.</p> : a.txs.length === 0 ? <p className="p-4 text-sm text-muted">No transparent transactions for this address.</p> : (
           <ul className="divide-y divide-border">{a.txs.map((t) => (
-            <li key={t.txid + t.height} className="flex items-start gap-3 px-4 py-3">
-              <div className="min-w-0 flex-1"><HashValue value={t.txid} label="txid" href={`/tx/${t.txid}`} /><p className="text-xs text-muted">block <Link className="num text-accent-text hover:underline" href={`/block/${t.height}`}>{t.height.toLocaleString()}</Link></p></div>
-              <p className={`num shrink-0 text-sm ${t.deltaZec >= 0 ? "text-accent-text" : "text-danger"}`}>{t.deltaZec >= 0 ? "+" : ""}{t.deltaZec.toFixed(4)}</p>
+            <li key={t.txid} className="flex items-start gap-3 px-4 py-3">
+              <div className="min-w-0 flex-1"><HashValue value={t.txid} label="txid" href={`/tx/${t.txid}`} /><p className="text-xs text-muted">{t.height !== null ? <>block <Link className="num text-accent-text hover:underline" href={`/block/${t.height}`}>{t.height.toLocaleString()}</Link></> : "block not reported"}</p></div>
+              {t.deltaZec === null ? <p className="shrink-0 text-xs text-muted">change not reported</p> : <p className={`num shrink-0 text-sm ${t.deltaZec >= 0 ? "text-accent-text" : "text-danger"}`}>{t.deltaZec >= 0 ? "+" : ""}{t.deltaZec.toFixed(4)}</p>}
             </li>))}</ul>)}
       </Card>
       <Raw data={a} label="Raw address data" />
