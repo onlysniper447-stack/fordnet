@@ -8,7 +8,8 @@ Fordnet reports only public protocol data. Shielded amounts and parties are not 
 
 ## Features
 - **Navigation**: top-left menu (accessible slide-in drawer: focus trap, Esc to close, focus return, active route) grouping Tools, Analytics, API and Products.
-- **Analytics** `/analytics`: network status and pool history on one page.
+- **Analytics** `/analytics`: network status and pool history on one page. Pool chart defaults to **Per pool** small multiples (each pool on its own y-axis, with current value and change over range), with a **Stacked** view and an accessible table.
+- **HTTP semantics**: malformed block/tx/address ids return **400** (middleware rewrite to a friendly page); well-formed but unknown ids return **404**.
 - **Dashboard** `/`: sync pill (green = last block < 5 min old, amber = lagging, red = node unreachable → last snapshot with timestamp), headline cards (height, hashrate, last block age, txs in last block), recent blocks, pool-value chart (7D/30D/All, exact tooltips, series toggles, "view as table", source + last updated), privacy note, collapsible raw JSON.
 - **Search**: persistent header search (`/` focuses it on desktop; `/search` autofocuses on mobile). Detects height, 64-hex (tries block then tx, ordered by a leading-zeros hint), t1/t3 addresses; explains shielded/unified addresses and malformed input.
 - **Detail pages**: `/block/[id]`, `/tx/[txid]` (shielded parts shown as counts only), `/address/[taddr]` (transparent balance + recent txs; shielded activity not visible).

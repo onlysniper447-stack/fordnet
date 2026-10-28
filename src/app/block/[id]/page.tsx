@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { notFound } from "next/navigation";
 import { Card, Field, Notice, PageTitle, Raw } from "@/components/ui";
 import { HashValue } from "@/components/copy";
 import { heightOrHashSchema } from "@/lib/detect";
@@ -10,10 +11,10 @@ export const dynamic = "force-dynamic";
 export default async function BlockPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const v = heightOrHashSchema.safeParse(id);
-  if (!v.success) return <Notice tone="error" title="Invalid block identifier">{v.error.issues[0]?.message}</Notice>;
+  if (!v.success) notFound(); // malformed ids get a 400 from middleware before reaching here
   const b = await getBlockDetail(String(v.data)).catch(() => undefined);
   if (b === undefined) return <Notice tone="error" title="Node unreachable">We couldn&apos;t reach the Zcash node and this block isn&apos;t cached. Try again in a minute.</Notice>;
-  if (!b) return <Notice tone="warn" title="Block not found">No block matches <span className="num break-all">{id}</span>. <Link className="text-accent-text underline" href="/search">Search again</Link>.</Notice>;
+  if (!b) notFound();
   return (
     <div>
       <PageTitle eyebrow="Block" title={<span className="num">#{b.height.toLocaleString()}</span>}>

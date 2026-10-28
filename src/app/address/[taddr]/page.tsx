@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { notFound } from "next/navigation";
 import { Card, Notice, PageTitle, Raw } from "@/components/ui";
 import { HashValue } from "@/components/copy";
 import { taddrSchema } from "@/lib/detect";
@@ -10,7 +11,7 @@ export const dynamic = "force-dynamic";
 export default async function AddressPage({ params }: { params: Promise<{ taddr: string }> }) {
   const { taddr } = await params;
   const v = taddrSchema.safeParse(taddr);
-  if (!v.success) return <Notice tone="error" title="Invalid transparent address">{v.error.issues[0]?.message}</Notice>;
+  if (!v.success) notFound();
   const a = await getAddressInfo(v.data).catch(() => null);
   if (!a) return <Notice tone="error" title="Node unreachable">Couldn&apos;t reach the Zcash node. Try again shortly.</Notice>;
   return (

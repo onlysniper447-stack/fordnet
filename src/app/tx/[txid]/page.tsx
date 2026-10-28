@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { notFound } from "next/navigation";
 import { Card, Field, Notice, PageTitle, Raw } from "@/components/ui";
 import { HashValue } from "@/components/copy";
 import { hex64Schema } from "@/lib/detect";
@@ -10,10 +11,10 @@ export const dynamic = "force-dynamic";
 export default async function TxPage({ params }: { params: Promise<{ txid: string }> }) {
   const { txid } = await params;
   const v = hex64Schema.safeParse(txid);
-  if (!v.success) return <Notice tone="error" title="Invalid txid">{v.error.issues[0]?.message}</Notice>;
+  if (!v.success) notFound();
   const t = await getTxDetail(v.data).catch(() => undefined);
   if (t === undefined) return <Notice tone="error" title="Node unreachable">Couldn&apos;t reach the Zcash node. Try again shortly.</Notice>;
-  if (!t) return <Notice tone="warn" title="Transaction not found">No transaction matches this txid. zcashd needs <code className="num">-txindex</code> to look up arbitrary transactions. <Link className="text-accent-text underline" href="/search">Search again</Link>.</Notice>;
+  if (!t) notFound();
   const sh = t.shielded;
   const shieldedTotal = sh.saplingSpends + sh.saplingOutputs + sh.orchardActions + sh.sproutJoinSplits;
   return (
