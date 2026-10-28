@@ -34,6 +34,8 @@ pnpm build
 | Var | Purpose |
 |---|---|
 | `ZCASH_RPC_URL` | zcashd/Zebra JSON-RPC URL. Empty → MOCKED client |
+| `ZCASH_RPC_URL_FALLBACK` | Optional second JSON-RPC URL, used automatically when the primary times out or returns 429/503 |
+| `ZCASH_RPC_TIMEOUT_MS` | Per-call timeout (default 8000) |
 | `ZCASH_RPC_USER`, `ZCASH_RPC_PASS` | Basic-auth credentials |
 | `ZCASH_MOCK` | `1` forces mock even with a URL |
 | `DATABASE_URL` | Neon Postgres connection string (required) |
@@ -45,7 +47,7 @@ Node notes: address pages need zcashd `-insightexplorer` (`getaddressbalance`/`g
 
 ## Architecture
 ```
- ┌───────────────────────────┐  JSON-RPC: 5s timeout; 503 → one retry after 750ms;
+ ┌───────────────────────────┐  JSON-RPC: 8s timeout; 503 → one retry after 750ms;
  │ Zcash node (GetBlock      │  429 → never retried, throws RpcRateLimited
  │ shared Zebra) — or MockRpc│◄──────────────────────────────────────────────┐
  └─────────────┬─────────────┘                                               │
@@ -77,15 +79,21 @@ Routes: `/` is the homepage (what Fordnet is, live strip); the dashboard is at `
 - Reads never wait for the node: `ensureFresh()` schedules `ingestIfDue()` with Next.js `after()`, so the response is sent first.
 - `ingestIfDue` runs only when `lastIngestAt` is over 60s old and no provider backoff is active. It then takes a single-flight lease (an upsert on the `meta` row `ingestLease`, which succeeds only if the previous lease expired, 55s), so only one instance ingests at a time across all serverless instances.
 - Order: `getblockchaininfo`, `getnetworksolps`, tip block → status snapshot + `lastIngestAt` + today's pool snapshot. Then, best effort within a time budget (20s on request, 50s for `?full=1` cron, 120s for `pnpm ingest`): new blocks (≤30 per run on Vercel) and pool backfill (≤10 days per run). A slow or failed block fetch is skipped, not fatal.
-- Failures are recorded in `meta.rpcHealth` with a reason and a retry time: `rate_limited` (HTTP 429, back off 120s), `provider_error` (HTTP 503, 120s), `unreachable` (timeouts/network, 60s). A success clears it.
+- Calls use an 8s timeout (`ZCASH_RPC_TIMEOUT_MS`) with one retry (none on 429). If `getblockchaininfo` fails, ingest confirms reachability with the light `getblockcount` + `getbestblockhash` and keeps going; the tip block is fetched with its own retry (verbosity 2, then 1).
+- Optional `ZCASH_RPC_URL_FALLBACK`: a second endpoint tried automatically when the primary times out or returns 429/503.
+- Failures are recorded in `meta.rpcHealth` with a reason and a retry time: `rate_limited` (HTTP 429, back off 30s), `provider_error` (HTTP 503, 20s), `unreachable` (timeouts/network, 20s). A success clears it.
 
 ### Status freshness and states
-The status shown everywhere comes from the latest DB snapshot. Under 3 minutes old it is current and the state is recomputed (`synced` when the last block is < 5 min old, `lagging` otherwise or when headers are > 2 ahead). Older than 3 minutes it is shown as stale with the precise reason and the data timestamp:
-- `rate_limited` — "Node provider is rate-limiting us — showing stored data" (with the data time and next attempt)
-- `provider_error` — "Node provider is returning errors (HTTP 503) — showing stored data"
-- `unreachable` — only when ingest has actually failed (not because one call was slow).
+One pure function (`deriveState` in `src/lib/state.ts`, unit-tested in `tests/state.test.ts`) decides the state for `/`, `/dashboard`, `/analytics` and `/api/v1/network/status`. It is driven by **data age**, never by a single failed attempt:
 
-The API exposes this as `state` plus `degraded: null | { reason, since, retryAt }`.
+| Data age (last successful ingest) | Provider failing now? | `state` | Pill |
+|---|---|---|---|
+| < 5 min | any | `synced` (last block < 5 min, headers ≤ 2 ahead) or `lagging` | green / amber |
+| 5–15 min | any | `delayed` | amber "Delayed — provider slow" + data time |
+| > 15 min | no recorded failure | `delayed` | amber |
+| > 15 min | yes | `unreachable` | red |
+
+`degraded` is `null` while data is < 5 min old, otherwise `{ reason: rate_limited | provider_error | unreachable | stale, since, retryAt }`. A hiccup while data is still fresh is only exposed as `providerNote` in the raw JSON.
 
 ### GetBlock shared tier notes
 The shared endpoint answers single calls in about 1–4s, but rate-limits bursts (40 parallel calls → 14×200, 20×429, 5×503, 1 timeout) and intermittently returns `503 Service temporarily unavailable` after ~10s. No daily quota exhaustion was observed and it sends no `Retry-After`. Fordnet therefore keeps RPC volume to one serial ingest per minute plus cache misses. Address fetches are sequential (≤10 txs). A second RPC URL as a fallback would add resilience but is not required.

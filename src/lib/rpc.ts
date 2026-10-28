@@ -19,6 +19,8 @@ export interface ZcashRpc {
   readonly mocked: boolean;
   getBlockchainInfo(): Promise<RpcBlockchainInfo>;
   getBlockHash(height: number): Promise<string>;
+  getBlockCount(): Promise<number>;
+  getBestBlockHash(): Promise<string>;
   getBlock(hashOrHeight: string, verbosity?: 1 | 2): Promise<RpcBlock | null>;
   getAddressTxids(addr: string): Promise<string[] | null>;
   getMiningInfo(): Promise<RpcMiningInfo>;
@@ -28,18 +30,32 @@ export interface ZcashRpc {
   getAddressDeltas(addr: string): Promise<RpcAddressDelta[] | null>;
 }
 
-const TIMEOUT_MS = 5000;
+const TIMEOUT_MS = Number(process.env.ZCASH_RPC_TIMEOUT_MS ?? 8000); // shared tiers often take 3-6s
 const NOT_FOUND_CODES = new Set([-5, -8]);
 
 export class HttpRpcClient implements ZcashRpc {
   readonly mocked = false;
-  constructor(private url: string, private user?: string, private pass?: string) {}
+  /** urls[0] is primary; later entries (ZCASH_RPC_URL_FALLBACK) are tried automatically on transport/provider failure. */
+  private urls: string[];
+  constructor(url: string | string[], private user?: string, private pass?: string) { this.urls = Array.isArray(url) ? url : [url]; }
 
   async call<T>(method: string, params: unknown[] = []): Promise<T> {
     let lastErr: unknown;
+    for (const url of this.urls) {
+      try { return await this.callOne<T>(url, method, params); }
+      catch (e) {
+        if (e instanceof RpcError && e.code !== null) throw e; // a real RPC answer (e.g. not found): same on any node
+        lastErr = e;
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new RpcError(String(lastErr));
+  }
+
+  private async callOne<T>(url: string, method: string, params: unknown[]): Promise<T> {
+    let lastErr: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        return await this.once<T>(method, params);
+        return await this.once<T>(url, method, params);
       } catch (e) {
         if (e instanceof RpcError && e.code !== null) throw e; // node answered with an RPC error
         if (e instanceof RpcRateLimited && e.status === 429) throw e; // rate-limited: back off, don't hammer
@@ -50,10 +66,10 @@ export class HttpRpcClient implements ZcashRpc {
     throw lastErr instanceof Error ? lastErr : new RpcError(String(lastErr));
   }
 
-  private async once<T>(method: string, params: unknown[]): Promise<T> {
+  private async once<T>(url: string, method: string, params: unknown[]): Promise<T> {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.user || this.pass) headers.authorization = "Basic " + Buffer.from(`${this.user ?? ""}:${this.pass ?? ""}`).toString("base64");
-    const res = await fetch(this.url, {
+    const res = await fetch(url, {
       method: "POST", headers, cache: "no-store",
       body: JSON.stringify({ jsonrpc: "1.0", id: "fordnet", method, params }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -77,6 +93,8 @@ export class HttpRpcClient implements ZcashRpc {
   }
   getBlockchainInfo() { return this.call<RpcBlockchainInfo>("getblockchaininfo"); }
   getBlockHash(h: number) { return this.call<string>("getblockhash", [h]); }
+  getBlockCount() { return this.call<number>("getblockcount"); }
+  getBestBlockHash() { return this.call<string>("getbestblockhash"); }
   async getBlock(id: string, verbosity: 1 | 2 = 2) {
     const b = await this.nullOnNotFound(this.call<RpcBlock>("getblock", [id, verbosity]));
     if (b && verbosity === 2) for (const t of b.tx as (RpcTx & { hex?: string })[]) delete t.hex; // drop raw hex: big, not displayed
@@ -102,6 +120,8 @@ export class MockRpcClient implements ZcashRpc {
     const h = /^\d+$/.test(id) ? Number(id) : mock.mockHeightFromHash(id);
     return h === null ? null : mock.mockBlock(h);
   }
+  async getBlockCount() { return mock.mockTipHeight(); }
+  async getBestBlockHash() { return mock.mockBlockHash(mock.mockTipHeight()); }
   async getMiningInfo() { return mock.mockMiningInfo(); }
   async getNetworkSolPs() { return mock.mockMiningInfo().networksolps ?? null; }
   async getRawTransaction(txid: string) { return mock.mockTx(txid); }
@@ -115,7 +135,7 @@ export function getRpc(): ZcashRpc {
   if (client) return client;
   const url = process.env.ZCASH_RPC_URL;
   client = url && process.env.ZCASH_MOCK !== "1"
-    ? new HttpRpcClient(url, process.env.ZCASH_RPC_USER, process.env.ZCASH_RPC_PASS)
+    ? new HttpRpcClient([url, ...(process.env.ZCASH_RPC_URL_FALLBACK ? [process.env.ZCASH_RPC_URL_FALLBACK] : [])], process.env.ZCASH_RPC_USER, process.env.ZCASH_RPC_PASS)
     : new MockRpcClient();
   return client;
 }

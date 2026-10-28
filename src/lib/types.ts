@@ -80,10 +80,11 @@ export interface RpcAddressDelta {
   satoshis: number;
 }
 
-export type SyncState = "synced" | "lagging" | "rate_limited" | "provider_error" | "unreachable";
+/** Driven by data freshness: synced/lagging (data < 5 min old), delayed (5-15 min), unreachable (> 15 min and attempts failing). */
+export type SyncState = "synced" | "lagging" | "delayed" | "unreachable";
 
 export interface Degraded {
-  reason: "rate_limited" | "provider_error" | "unreachable";
+  reason: "rate_limited" | "provider_error" | "unreachable" | "stale";
   since: number | null; // unix ms of first failure
   retryAt: number | null; // unix ms when we will try the node again
   detail?: string; // last error message (no secrets)
@@ -113,7 +114,9 @@ export interface NetworkStatus {
   verificationProgress: number | null;
   pools: PoolValues;
   snapshotAt: number | null; // unix ms of data
-  degraded: Degraded | null; // set when serving a stale snapshot
+  degraded: Degraded | null; // set when data is older than 5 min
+  /** Last provider hiccup, informational only (raw JSON); never changes the state by itself. */
+  providerNote?: Degraded | null;
 }
 
 export interface BlockSummary {

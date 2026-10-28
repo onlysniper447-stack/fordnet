@@ -2,12 +2,12 @@ import { desc, eq, gte } from "drizzle-orm";
 import { after } from "next/server";
 import { getDb, schema } from "@/db";
 import { getRpc } from "./rpc";
-import { ensureFresh, latestSnapshot, rpcHealth, syncState } from "./ingest";
+import { ensureFresh, latestSnapshot, rpcHealth } from "./ingest";
+import { deriveState } from "./state";
 import type { AddressInfo, BlockDetail, BlockSummary, NetworkStatus, PoolPoint, PoolRange, RpcBlock, RpcTx, TxDetail, TxSummary } from "./types";
 
 const EMPTY_POOLS = { transparent: null, sprout: null, sapling: null, orchard: null, lockbox: null, ironwood: null };
 
-const FRESH_MS = 3 * 60_000; // snapshot older than this (after a refresh attempt) => degraded
 
 let statusCache: { at: number; v: NetworkStatus } | null = null;
 /** Served from the DB snapshot written by ingest; no per-request RPC. */
@@ -20,14 +20,11 @@ export async function getNetworkStatus(): Promise<NetworkStatus> {
 async function buildStatus(): Promise<NetworkStatus> {
   await ensureFresh();
   const [snap, health] = await Promise.all([latestSnapshot(), rpcHealth().catch(() => null)]);
+  const d = deriveState(snap, health);
   if (!snap || snap.snapshotAt === null) {
-    return { state: health?.reason ?? "unreachable", live: false, mocked: getRpc().mocked, chain: null, height: null, headers: null, bestBlockHash: null, hashrateSolPerSec: null, difficulty: null, lastBlockTime: null, lastBlockTxCount: null, verificationProgress: null, pools: EMPTY_POOLS, snapshotAt: null, degraded: health ?? { reason: "unreachable", since: null, retryAt: null } };
+    return { mocked: getRpc().mocked, chain: null, height: null, headers: null, bestBlockHash: null, hashrateSolPerSec: null, difficulty: null, lastBlockTime: null, lastBlockTxCount: null, verificationProgress: null, pools: EMPTY_POOLS, snapshotAt: null, ...d };
   }
-  if (Date.now() - snap.snapshotAt < FRESH_MS) {
-    return { ...snap, state: syncState(snap.lastBlockTime, snap.height, snap.headers), live: true, degraded: null };
-  }
-  const d = health ?? { reason: "unreachable" as const, since: snap.snapshotAt, retryAt: null };
-  return { ...snap, state: d.reason, live: false, degraded: d };
+  return { ...snap, ...d };
 }
 
 /** Read-through cache in Postgres so repeat lookups don't hit the RPC provider. Serves stale on failure. */

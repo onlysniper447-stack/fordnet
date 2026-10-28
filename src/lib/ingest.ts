@@ -3,22 +3,16 @@ import { after } from "next/server";
 import { getDb, schema } from "@/db";
 import { getRpc, RpcRateLimited } from "./rpc";
 import { poolsFrom } from "./pools";
-import type { Degraded, NetworkStatus, RpcBlock, SyncState } from "./types";
+import type { Degraded, NetworkStatus, RpcBlock, RpcBlockchainInfo } from "./types";
+import { syncState } from "./state";
+export { syncState, LAG_THRESHOLD_SEC } from "./state";
 
-export const LAG_THRESHOLD_SEC = 300; // 5 min: Zcash targets 75s blocks with high variance
 const BLOCKS_PER_DAY = 1152; // 75s target spacing
 const KEEP_BLOCKS = 100;
 // Shared-tier RPC providers rate-limit; keep calls per run bounded.
 const BACKFILL_DAYS = Number(process.env.POOL_BACKFILL_DAYS ?? 30);
 const MAX_BACKFILL_PER_RUN = Number(process.env.POOL_BACKFILL_PER_RUN ?? 10);
 const MAX_NEW_BLOCKS_PER_RUN = Number(process.env.MAX_NEW_BLOCKS_PER_RUN ?? (process.env.VERCEL ? 30 : 100));
-
-export function syncState(lastBlockTime: number | null, height: number | null, headers: number | null, nowMs = Date.now()): SyncState {
-  if (height === null || lastBlockTime === null) return "unreachable";
-  const lagSec = nowMs / 1000 - lastBlockTime;
-  if (lagSec < LAG_THRESHOLD_SEC && (headers === null || headers - height <= 2)) return "synced";
-  return "lagging";
-}
 
 export interface IngestResult { height: number; newBlocks: number; poolDaysWritten: number; blockErrors: number; mocked: boolean; }
 
@@ -42,6 +36,24 @@ async function storePoolDay(b: RpcBlock, takenAt: number) {
     .onConflictDoUpdate({ target: schema.poolSnapshots.date, set: { height: b.height, takenAt, ...p } });
 }
 
+/**
+ * getblockchaininfo is the heaviest essential call and the one GetBlock's shared tier times out on.
+ * On failure confirm reachability with the light getblockcount + getbestblockhash and reuse the
+ * slow-moving fields (difficulty, pools) from the previous snapshot.
+ */
+async function essentials(rpc: ReturnType<typeof getRpc>, db: Awaited<ReturnType<typeof getDb>>): Promise<RpcBlockchainInfo> {
+  try { return await rpc.getBlockchainInfo(); }
+  catch (e) {
+    if (e instanceof RpcRateLimited && e.status === 429) throw e;
+    const blocks = await rpc.getBlockCount();
+    const bestblockhash = await rpc.getBestBlockHash();
+    const [prev] = await db.select().from(schema.statusSnapshots).orderBy(desc(schema.statusSnapshots.takenAt)).limit(1);
+    const p = prev ? (JSON.parse(prev.json) as NetworkStatus) : null;
+    console.warn(`[ingest] getblockchaininfo failed (${e instanceof Error ? e.message : String(e)}); used getblockcount/getbestblockhash`);
+    return { chain: p?.chain ?? "main", blocks, bestblockhash, difficulty: p?.difficulty ?? undefined, verificationprogress: p?.verificationProgress ?? undefined };
+  }
+}
+
 async function doIngest(opts: IngestOptions): Promise<IngestResult> {
   const maxNew = opts.maxNewBlocks ?? MAX_NEW_BLOCKS_PER_RUN;
   const maxBackfill = opts.maxBackfillPerRun ?? MAX_BACKFILL_PER_RUN;
@@ -52,7 +64,7 @@ async function doIngest(opts: IngestOptions): Promise<IngestResult> {
   const overBudget = () => Date.now() - now > budgetMs;
 
   // 1) essentials first: chain info, tip block, status snapshot. Freshness recovers even if the rest is slow.
-  const info = await rpc.getBlockchainInfo();
+  const info = await essentials(rpc, db);
   const tip = info.blocks;
   const solps = await rpc.getNetworkSolPs();
   const mining = solps === null ? await rpc.getMiningInfo().catch(() => null) : null;
@@ -60,7 +72,10 @@ async function doIngest(opts: IngestOptions): Promise<IngestResult> {
   let tipBlock: RpcBlock | null = tipRow && tipRow.hash === info.bestblockhash ? (JSON.parse(tipRow.raw) as RpcBlock) : null;
   let newBlocks = 0;
   if (!tipBlock) {
-    tipBlock = await rpc.getBlock(String(tip)).catch((e: unknown) => { if (e instanceof RpcRateLimited && e.status === 429) throw e; return null; });
+    // tip fetched separately with its own retry; a light verbosity-1 read is enough for time/tx count/pools
+    for (let i = 0; i < 2 && !tipBlock; i++) {
+      tipBlock = await rpc.getBlock(String(tip), i === 0 ? 2 : 1).catch((e: unknown) => { if (e instanceof RpcRateLimited && e.status === 429) throw e; return null; });
+    }
     if (tipBlock) { await storeBlock(tipBlock); newBlocks++; }
   }
   const status: NetworkStatus = {
@@ -69,7 +84,7 @@ async function doIngest(opts: IngestOptions): Promise<IngestResult> {
     bestBlockHash: info.bestblockhash, hashrateSolPerSec: solps ?? mining?.networksolps ?? null,
     difficulty: info.difficulty ?? mining?.difficulty ?? null, lastBlockTime: tipBlock?.time ?? null,
     lastBlockTxCount: tipBlock?.tx.length ?? null, verificationProgress: info.verificationprogress ?? null,
-    pools: poolsFrom(info.valuePools), snapshotAt: now, degraded: null,
+    pools: poolsFrom(info.valuePools ?? tipBlock?.valuePools), snapshotAt: now, degraded: null,
   };
   await db.insert(schema.statusSnapshots).values({ takenAt: now, json: JSON.stringify(status) });
   await db.insert(schema.meta).values({ key: "lastIngestAt", value: String(now) })
@@ -114,8 +129,8 @@ export async function lastIngestAt(): Promise<number | null> {
 }
 
 const LEASE_MS = 55_000;
-const RATE_LIMIT_BACKOFF_MS = 120_000;
-const UNREACHABLE_BACKOFF_MS = 60_000;
+const RATE_LIMIT_BACKOFF_MS = 30_000; // shared-tier hiccups clear quickly; retry soon
+const UNREACHABLE_BACKOFF_MS = 20_000;
 
 async function setMeta(key: string, value: string) {
   const db = await getDb();

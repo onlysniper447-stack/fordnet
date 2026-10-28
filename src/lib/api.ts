@@ -43,7 +43,7 @@ export async function handleV1<T>(req: NextRequest, produce: () => Promise<T>, o
   } catch (e) {
     if (e instanceof BadRequest) return apiError(400, "bad_request", e.message, headers);
     if (e instanceof NotFound) return apiError(404, "not_found", e.message, headers);
-    return apiError(503, "upstream_unavailable", "The Zcash node did not respond (5s timeout, retried once). Try again shortly.", headers);
+    return apiError(503, "upstream_unavailable", "The Zcash node did not respond (8s timeout, retried once). Try again shortly.", headers);
   }
 }
 

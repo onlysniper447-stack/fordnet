@@ -49,7 +49,7 @@ export default async function Developers() {
           <div><dt className="num inline">401</dt><dd className="inline text-muted"> — missing or unknown x-api-key</dd></div>
           <div><dt className="num inline">404</dt><dd className="inline text-muted"> — block/tx not found</dd></div>
           <div><dt className="num inline">429</dt><dd className="inline text-muted"> — over 200 req/day; honour <code className="num">Retry-After</code> (seconds to UTC midnight)</dd></div>
-          <div><dt className="num inline">503</dt><dd className="inline text-muted"> — node unreachable (5s timeout, retried once)</dd></div>
+          <div><dt className="num inline">503</dt><dd className="inline text-muted"> — node unreachable (8s timeout, retried once, fallback URL if set)</dd></div>
           <p className="pt-2 text-muted">Headers: <code className="num">X-RateLimit-Limit / -Remaining / -Reset</code>. Responses are cached for 30 seconds.</p>
         </dl></Card>
       </section>
