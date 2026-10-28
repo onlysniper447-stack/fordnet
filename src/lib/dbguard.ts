@@ -10,10 +10,14 @@ export const dbAvailable = () => Date.now() >= downUntil;
 export const storageNote = () => (dbAvailable() ? null : reason);
 
 function markDown(e: unknown) {
-  const m = e instanceof Error ? `${e.name} ${e.message}` : String(e);
-  if (/402|quota/i.test(m)) { reason = "Database quota exceeded — serving live node data; history and caching paused"; downUntil = Date.now() + 60_000; }
-  else if (/Neon|DATABASE_URL|fetch failed|ECONN|ETIMEDOUT|socket|5\d\d/i.test(m)) { reason = "Database unavailable — serving live node data; history and caching paused"; downUntil = Date.now() + 15_000; }
-  console.warn(`[db] ${m.replace(/postgres(ql)?:\/\/\S+/g, "[url]").slice(0, 200)}`);
+  const err = e instanceof Error ? e : new Error(String(e));
+  const cause = err.cause instanceof Error ? err.cause : null;
+  const neon = [err, cause].find((x) => x && /NeonDbError/.test(x.name)) ?? null;
+  const text = `${neon?.message ?? cause?.message ?? err.message}`.slice(0, 200);
+  if (neon && /HTTP status 402|quota/i.test(neon.message)) { reason = "Database quota exceeded — serving live node data; history and caching paused"; downUntil = Date.now() + 60_000; }
+  else if (neon || /DATABASE_URL|fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT/i.test(text)) { reason = "Database unavailable — serving live node data; history and caching paused"; downUntil = Date.now() + 15_000; }
+  // anything else (e.g. a constraint error) is a one-off: fall back for this call only, keep the DB in use
+  console.warn(`[db] ${text.replace(/postgres(ql)?:\/\/\S+/g, "[url]")}`);
 }
 
 export async function withDb<T>(fn: () => Promise<T>, fallback: (e: unknown) => T | Promise<T>): Promise<T> {

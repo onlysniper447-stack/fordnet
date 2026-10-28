@@ -84,7 +84,7 @@ export interface RpcAddressDelta {
 export type SyncState = "synced" | "lagging" | "delayed" | "unreachable";
 
 export interface Degraded {
-  reason: "rate_limited" | "provider_error" | "unreachable" | "stale";
+  reason: "rate_limited" | "quota_exhausted" | "provider_error" | "unreachable" | "stale";
   since: number | null; // unix ms of first failure
   retryAt: number | null; // unix ms when we will try the node again
   detail?: string; // last error message (no secrets)

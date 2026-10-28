@@ -22,7 +22,7 @@ const g = globalThis as unknown as { __fordnetDb?: Promise<DB> };
 /** Neon Postgres over HTTP (serverless-friendly). DATABASE_URL is required. */
 export function getDb(): Promise<DB> {
   g.__fordnetDb ??= (async () => {
-    const url = process.env.DATABASE_URL;
+    const url = process.env.FORDNET_DATABASE_URL || process.env.DATABASE_URL; // FORDNET_ = current Neon store (fordnet-db-2)
     if (!url) throw new Error("DATABASE_URL is not set (Neon Postgres). See README.");
     const sql = neon(url);
     for (const stmt of DDL) await sql.query(stmt);

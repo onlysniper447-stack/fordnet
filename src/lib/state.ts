@@ -1,8 +1,9 @@
 import type { Degraded, SyncState } from "./types";
 
 export const LAG_THRESHOLD_SEC = 300; // 5 min: Zcash targets 75s blocks with high variance
-export const FRESH_MS = 5 * 60_000; // data younger than this is current, whatever the last attempt did
-export const DOWN_MS = 15 * 60_000; // red only past this AND while attempts are failing
+export const INGEST_INTERVAL_MS = 5 * 60_000; // stored data is refreshed at most this often (lets Neon compute auto-suspend)
+export const FRESH_MS = 10 * 60_000; // stored data / tip check younger than this is current, whatever the last attempt did
+export const DOWN_MS = 20 * 60_000; // red only past this AND while attempts are failing
 
 /** Chain-level state from a snapshot: is the chain moving and is the node caught up. */
 export function syncState(lastBlockTime: number | null, height: number | null, headers: number | null, nowMs = Date.now()): SyncState {
@@ -24,7 +25,7 @@ export function deriveState(snap: SnapLike | null, health: Degraded | null, now 
   }
   const age = now - snap.snapshotAt;
   if (age < FRESH_MS) return { state: syncState(snap.lastBlockTime, snap.height, snap.headers, now), live: true, degraded: null, providerNote: health };
-  if (age < DOWN_MS || !health) {
+  if (age < DOWN_MS || !health || health.reason === "quota_exhausted") { // out of quota: provider answers, data just paused until reset
     return { state: "delayed", live: false, degraded: { reason: health?.reason ?? "stale", since: health?.since ?? snap.snapshotAt, retryAt: health?.retryAt ?? null, ...(health?.detail ? { detail: health.detail } : {}) }, providerNote: health };
   }
   return { state: "unreachable", live: false, degraded: health, providerNote: health };

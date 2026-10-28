@@ -14,7 +14,7 @@ const EMPTY_POOLS = { transparent: null, sprout: null, sapling: null, orchard: n
 let statusCache: { at: number; v: NetworkStatus } | null = null;
 /** Served from the DB snapshot written by ingest; no per-request RPC. */
 export async function getNetworkStatus(): Promise<NetworkStatus> {
-  if (statusCache && Date.now() - statusCache.at < 15_000) return statusCache.v;
+  if (statusCache && Date.now() - statusCache.at < 30_000) return statusCache.v;
   const v = await buildStatus();
   statusCache = { at: Date.now(), v };
   return v;
@@ -57,9 +57,33 @@ async function liveStatus(): Promise<NetworkStatus> {
   return liveInflight;
 }
 
+let tipCache: { at: number; height: number; hash: string; time: number; txCount: number } | null = null;
+/** Cheap live tip for the pill between 5-min ingests: getblockcount (+ one getblock v1 only when the tip moved). Memoised 60s. */
+async function liveTip(known: NetworkStatus | null) {
+  if (tipCache && Date.now() - tipCache.at < 60_000) return tipCache;
+  const rpc = getRpc();
+  const height = await rpc.getBlockCount();
+  if (tipCache && tipCache.height === height) return (tipCache = { ...tipCache, at: Date.now() });
+  if (known && known.height === height && known.bestBlockHash && known.lastBlockTime !== null && known.lastBlockTxCount !== null)
+    return (tipCache = { at: Date.now(), height, hash: known.bestBlockHash, time: known.lastBlockTime, txCount: known.lastBlockTxCount });
+  const b = await rpc.getBlock(String(height), 1);
+  if (!b) throw new Error("tip block not found");
+  return (tipCache = { at: Date.now(), height, hash: b.hash, time: b.time, txCount: b.tx.length });
+}
+
+let snapCache: { at: number; snap: NetworkStatus | null; health: Awaited<ReturnType<typeof rpcHealth>> } | null = null;
 async function fromDb(): Promise<NetworkStatus> {
   await ensureFresh();
-  const [snap, health] = await Promise.all([latestSnapshot(), rpcHealth().catch(() => null)]);
+  if (!snapCache || Date.now() - snapCache.at > 60_000) { // stored snapshot changes every 5 min; read it at most once a minute
+    const [s, h] = await Promise.all([latestSnapshot(), rpcHealth().catch(() => null)]);
+    snapCache = { at: Date.now(), snap: s, health: h };
+  }
+  let { snap } = snapCache; const { health } = snapCache;
+  if (snap && snap.snapshotAt !== null && Date.now() - snap.snapshotAt > 90_000) {
+    // overlay the live tip so the pill reflects the chain now, not the last ingest
+    const t = await liveTip(snap).catch(() => null);
+    if (t) snap = { ...snap, height: t.height, headers: t.height > (snap.headers ?? 0) ? t.height : snap.headers, bestBlockHash: t.hash, lastBlockTime: t.time, lastBlockTxCount: t.txCount, snapshotAt: t.at };
+  }
   const d = deriveState(snap, health);
   if (!snap || snap.snapshotAt === null) {
     return { mocked: getRpc().mocked, chain: null, height: null, headers: null, bestBlockHash: null, hashrateSolPerSec: null, difficulty: null, lastBlockTime: null, lastBlockTxCount: null, verificationProgress: null, pools: EMPTY_POOLS, snapshotAt: null, ...d };
@@ -83,6 +107,7 @@ async function cached<T>(key: string, ttlMs: number, fetcher: () => Promise<T | 
     const db = await getDb();
     if (v !== null) {
       const value = JSON.stringify(v); const fetchedAt = Date.now();
+      if (value.length > MAX_CACHE_BYTES) return v; // too big for the shared cache (free-tier storage)
       await db.insert(schema.rpcCache).values({ key, value, fetchedAt }).onConflictDoUpdate({ target: schema.rpcCache.key, set: { value, fetchedAt } });
     }
     return v;
@@ -100,6 +125,7 @@ async function cached<T>(key: string, ttlMs: number, fetcher: () => Promise<T | 
 }
 const refreshing = new Set<string>();
 const memCache = new Map<string, { at: number; v: unknown }>();
+const MAX_CACHE_BYTES = 128_000;
 
 let recentCache: { at: number; v: BlockSummary[] } | null = null;
 export async function getRecentBlocks(limit: number): Promise<BlockSummary[]> {
@@ -116,7 +142,15 @@ export async function getRecentBlocks(limit: number): Promise<BlockSummary[]> {
     return out;
   });
 }
+const recentDbCache = new Map<number, { at: number; v: BlockSummary[] }>();
 async function recentFromDb(limit: number): Promise<BlockSummary[]> {
+  const c = recentDbCache.get(limit);
+  if (c && Date.now() - c.at < 60_000) return c.v;
+  const v = await recentQuery(limit);
+  recentDbCache.set(limit, { at: Date.now(), v });
+  return v;
+}
+async function recentQuery(limit: number): Promise<BlockSummary[]> {
   await ensureFresh();
   return (await getDb()).select({ height: schema.blocks.height, hash: schema.blocks.hash, time: schema.blocks.time, size: schema.blocks.size, txCount: schema.blocks.txCount })
     .from(schema.blocks).orderBy(desc(schema.blocks.height)).limit(limit);
@@ -135,6 +169,10 @@ function summarizeTx(t: RpcTx): TxSummary {
 export async function getBlockDetail(id: string): Promise<BlockDetail | null> {
   const isHeight = /^\d+$/.test(id);
   const row = await withDb(async () => (await (await getDb()).select().from(schema.blocks).where(isHeight ? eq(schema.blocks.height, Number(id)) : eq(schema.blocks.hash, id)).limit(1))[0], () => undefined);
+  if (!row && isHeight) { // far above the known tip: not found without spending an RPC call (works while the node is out of quota)
+    const known = await withDb(async () => (await latestSnapshot())?.height ?? null, () => liveCache?.v.height ?? null);
+    if (known !== null && Number(id) > known + 1000) return null;
+  }
   const b: RpcBlock | null = row ? (JSON.parse(row.raw) as RpcBlock) : await cached(`block:${id}`, 10 * 60_000, () => getRpc().getBlock(id));
   if (!b) return null;
   const tip = await withDb(async () => (await latestSnapshot())?.height ?? null, async () => (await liveStatus()).height);
@@ -147,8 +185,10 @@ export async function getBlockDetail(id: string): Promise<BlockDetail | null> {
 }
 
 export async function getTxDetail(txid: string): Promise<TxDetail | null> {
-  const t = await cached(`tx:${txid}`, 10 * 60_000, () => getRpc().getRawTransaction(txid));
-  if (!t) return null;
+  // cache the compact summary, never the raw tx (large consolidation txs are many MB of JSON)
+  return cached(`txd:${txid}`, 10 * 60_000, async () => { const t = await getRpc().getRawTransaction(txid); return t ? toTxDetail(t) : null; });
+}
+function toTxDetail(t: RpcTx): TxDetail {
   return {
     txid: t.txid, blockHash: t.blockhash ?? null, height: t.height ?? null, time: t.blocktime ?? t.time ?? null,
     confirmations: t.confirmations ?? null, size: t.size ?? null, version: t.version ?? null,
@@ -172,10 +212,10 @@ async function fetchAddressInfo(address: string): Promise<AddressInfo> {
     // Zebra: no getaddressdeltas. Use getaddresstxids + getrawtransaction for the 10 most recent (delta not reported).
     const ids = await rpc.getAddressTxids(address);
     if (ids) {
-      const recent = ids.slice(-10).reverse();
-      const raws: (RpcTx | null)[] = [];
-      for (const id of recent) raws.push(await cached(`tx:${id}`, 10 * 60_000, () => rpc.getRawTransaction(id)).catch(() => null)); // sequential: gentle on the provider
-      txs = recent.map((txid, i) => ({ txid, height: raws[i]?.height ?? null, deltaZec: null }));
+      const recent = ids.slice(-5).reverse(); // 5 most recent: each costs provider compute units
+      const heights: (number | null)[] = [];
+      for (const id of recent) heights.push(await cached(`txh:${id}`, 24 * 3600_000, async () => { const t = await rpc.getRawTransaction(id); return t ? { h: t.height ?? null } : null; }).then((v) => v?.h ?? null).catch(() => null)); // sequential: gentle on the provider; only the height is kept
+      txs = recent.map((txid, i) => ({ txid, height: heights[i], deltaZec: null }));
       txs.sort((a, b) => (b.height ?? 0) - (a.height ?? 0));
     }
   }
@@ -189,7 +229,15 @@ async function fetchAddressInfo(address: string): Promise<AddressInfo> {
 export async function getPoolHistory(range: PoolRange): Promise<{ points: PoolPoint[]; updatedAt: number | null }> {
   return withDb(() => poolsFromDb(range), () => { throw new StorageUnavailable(storageNote() ?? "Database unavailable"); });
 }
+const poolCache = new Map<PoolRange, { at: number; v: { points: PoolPoint[]; updatedAt: number | null } }>();
 async function poolsFromDb(range: PoolRange): Promise<{ points: PoolPoint[]; updatedAt: number | null }> {
+  const c = poolCache.get(range);
+  if (c && Date.now() - c.at < 5 * 60_000) return c.v; // daily data; 5-min memo per instance
+  const v = await poolsQuery(range);
+  poolCache.set(range, { at: Date.now(), v });
+  return v;
+}
+async function poolsQuery(range: PoolRange): Promise<{ points: PoolPoint[]; updatedAt: number | null }> {
   await ensureFresh();
   const db = await getDb();
   const since = range === "all" ? "0000-00-00" : new Date(Date.now() - (range === "7d" ? 7 : 30) * 86400_000).toISOString().slice(0, 10);

@@ -1,7 +1,7 @@
 import { runIngest } from "../src/lib/ingest";
 
 const once = process.argv.includes("--once");
-const INTERVAL = 60_000;
+const INTERVAL = 5 * 60_000; // matches INGEST_INTERVAL_MS
 
 async function tick() {
   const t = Date.now();

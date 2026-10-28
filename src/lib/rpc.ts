@@ -14,6 +14,19 @@ export class RpcRateLimited extends Error {
   }
 }
 
+/** Provider's daily compute-unit quota is used up (GetBlock: HTTP 402 "Out of CU"). Resets at a fixed UTC time. */
+export class RpcQuotaExhausted extends RpcRateLimited {
+  constructor(public resetAt: number) { super(402, Math.ceil((resetAt - Date.now()) / 1000)); this.message = "RPC provider quota exhausted (HTTP 402)"; }
+}
+/** GetBlock tops up free-plan CU daily at 07:30 UTC (override with ZCASH_RPC_QUOTA_RESET_UTC="HH:MM"). */
+export function nextQuotaReset(now = Date.now()): number {
+  const [h, m] = (process.env.ZCASH_RPC_QUOTA_RESET_UTC ?? "07:30").split(":").map(Number);
+  const d = new Date(now); let t = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), h, m);
+  if (t <= now) t += 86400_000;
+  return t;
+}
+const quotaUntil = new Map<string, number>(); // per URL: skip calls entirely until the provider resets
+
 /** Single interface shared by the live and the MOCKED client. */
 export interface ZcashRpc {
   readonly mocked: boolean;
@@ -52,13 +65,15 @@ export class HttpRpcClient implements ZcashRpc {
   }
 
   private async callOne<T>(url: string, method: string, params: unknown[]): Promise<T> {
+    const q = quotaUntil.get(url);
+    if (q && Date.now() < q) throw new RpcQuotaExhausted(q);
     let lastErr: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         return await this.once<T>(url, method, params);
       } catch (e) {
         if (e instanceof RpcError && e.code !== null) throw e; // node answered with an RPC error
-        if (e instanceof RpcRateLimited && e.status === 429) throw e; // rate-limited: back off, don't hammer
+        if (e instanceof RpcRateLimited && (e.status === 429 || e.status === 402)) throw e; // rate-limited / out of quota: back off, don't hammer
         lastErr = e;
         if (attempt === 0 && e instanceof RpcRateLimited) await new Promise((r) => setTimeout(r, 750)); // 503: brief pause, one retry
       }
@@ -74,6 +89,7 @@ export class HttpRpcClient implements ZcashRpc {
       body: JSON.stringify({ jsonrpc: "1.0", id: "fordnet", method, params }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
+    if (res.status === 402) { const r = nextQuotaReset(); quotaUntil.set(url, r); throw new RpcQuotaExhausted(r); }
     if (res.status === 429 || res.status === 503) {
       const ra = Number(res.headers.get("retry-after"));
       throw new RpcRateLimited(res.status, Number.isFinite(ra) && ra > 0 ? ra : null);

@@ -34,7 +34,7 @@ export async function StatusSection() {
       </div>
       {!s.live && (
         <div className="mb-4">
-          <Notice tone={s.state === "unreachable" ? "error" : "warn"} title={s.state === "unreachable" ? (s.snapshotAt ? "Node unreachable for 15+ min — showing last snapshot" : "Node unreachable and no snapshot yet") : s.degraded?.reason === "rate_limited" ? "Data delayed — node provider is rate-limiting us" : s.degraded?.reason === "provider_error" ? "Data delayed — node provider is returning errors" : "Data delayed — node provider is slow"}>
+          <Notice tone={s.state === "unreachable" ? "error" : "warn"} title={s.state === "unreachable" && s.degraded?.reason !== "quota_exhausted" ? (s.snapshotAt ? "Node unreachable for 15+ min — showing last snapshot" : "Node unreachable and no snapshot yet") : s.degraded?.reason === "quota_exhausted" ? `Data delayed — node provider daily quota used up (resets ${s.degraded.retryAt ? new Date(s.degraded.retryAt).toISOString().slice(11, 16) + " UTC" : "daily"})` : s.degraded?.reason === "rate_limited" ? "Data delayed — node provider is rate-limiting us" : s.degraded?.reason === "provider_error" ? "Data delayed — node provider is returning errors" : "Data delayed — node provider is slow"}>
             {s.snapshotAt ? <>Data below is from <span className="num">{new Date(s.snapshotAt).toISOString().replace("T", " ").slice(0, 19)} UTC</span>.{s.degraded?.retryAt ? <> Next attempt after <span className="num">{new Date(s.degraded.retryAt).toISOString().slice(11, 19)} UTC</span>; the page refreshes on its own.</> : " It refreshes automatically when the node responds."}</> : <>Check ZCASH_RPC_URL, then run <code className="num">pnpm ingest</code>.</>}
           </Notice>
         </div>

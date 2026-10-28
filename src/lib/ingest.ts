@@ -1,10 +1,10 @@
 import { desc, eq, gt, inArray, lt, lte, sql } from "drizzle-orm";
 import { after } from "next/server";
 import { getDb, schema } from "@/db";
-import { getRpc, RpcRateLimited } from "./rpc";
+import { getRpc, RpcQuotaExhausted, RpcRateLimited } from "./rpc";
 import { poolsFrom } from "./pools";
 import type { Degraded, NetworkStatus, RpcBlock, RpcBlockchainInfo } from "./types";
-import { syncState } from "./state";
+import { INGEST_INTERVAL_MS, syncState } from "./state";
 import { dbAvailable } from "./dbguard";
 export { syncState, LAG_THRESHOLD_SEC } from "./state";
 
@@ -45,7 +45,7 @@ async function storePoolDay(b: RpcBlock, takenAt: number) {
 async function essentials(rpc: ReturnType<typeof getRpc>, db: Awaited<ReturnType<typeof getDb>>): Promise<RpcBlockchainInfo> {
   try { return await rpc.getBlockchainInfo(); }
   catch (e) {
-    if (e instanceof RpcRateLimited && e.status === 429) throw e;
+    if (e instanceof RpcRateLimited && (e.status === 429 || e.status === 402)) throw e;
     const blocks = await rpc.getBlockCount();
     const bestblockhash = await rpc.getBestBlockHash();
     const [prev] = await db.select().from(schema.statusSnapshots).orderBy(desc(schema.statusSnapshots.takenAt)).limit(1);
@@ -75,7 +75,7 @@ async function doIngest(opts: IngestOptions): Promise<IngestResult> {
   if (!tipBlock) {
     // tip fetched separately with its own retry; a light verbosity-1 read is enough for time/tx count/pools
     for (let i = 0; i < 2 && !tipBlock; i++) {
-      tipBlock = await rpc.getBlock(String(tip), i === 0 ? 2 : 1).catch((e: unknown) => { if (e instanceof RpcRateLimited && e.status === 429) throw e; return null; });
+      tipBlock = await rpc.getBlock(String(tip), i === 0 ? 2 : 1).catch((e: unknown) => { if (e instanceof RpcRateLimited && (e.status === 429 || e.status === 402)) throw e; return null; });
     }
     if (tipBlock) { await storeBlock(tipBlock); newBlocks++; }
   }
@@ -91,7 +91,11 @@ async function doIngest(opts: IngestOptions): Promise<IngestResult> {
   await db.insert(schema.meta).values({ key: "lastIngestAt", value: String(now) })
     .onConflictDoUpdate({ target: schema.meta.key, set: { value: String(now) } });
   let poolDaysWritten = 0;
-  if (tipBlock) { await storePoolDay(tipBlock, now); poolDaysWritten++; }
+  // one pool row per UTC day: write today's only when missing or > 6h old (fewer writes)
+  if (tipBlock) {
+    const [today] = await db.select({ takenAt: schema.poolSnapshots.takenAt }).from(schema.poolSnapshots).where(eq(schema.poolSnapshots.date, utcDate(tipBlock.time))).limit(1);
+    if (!today || now - today.takenAt > 6 * 3600_000) { await storePoolDay(tipBlock, now); poolDaysWritten++; }
+  }
 
   // 2) best effort: fill the last 100 blocks newest-first (re-check a 10-block reorg window), within budget
   const stored = new Map((await db.select({ h: schema.blocks.height, hash: schema.blocks.hash }).from(schema.blocks)
@@ -102,13 +106,14 @@ async function doIngest(opts: IngestOptions): Promise<IngestResult> {
     if (existing && h < tip - 10) continue;
     let b: RpcBlock | null;
     try { b = await rpc.getBlock(String(h)); }
-    catch (e) { if (e instanceof RpcRateLimited && e.status === 429) throw e; blockErrors++; break; }
+    catch (e) { if (e instanceof RpcRateLimited && (e.status === 429 || e.status === 402)) throw e; blockErrors++; break; }
     if (!b) continue;
     if (existing !== b.hash) { await storeBlock(b); newBlocks++; }
     if (newBlocks >= maxNew) break; // remaining history fills on later runs
   }
-  await db.delete(schema.blocks).where(lte(schema.blocks.height, tip - KEEP_BLOCKS * 5));
-  await db.delete(schema.statusSnapshots).where(lt(schema.statusSnapshots.takenAt, now - 7 * 86400_000));
+  await db.delete(schema.blocks).where(lte(schema.blocks.height, tip - KEEP_BLOCKS)); // keep the last 100 only
+  await db.delete(schema.statusSnapshots).where(lt(schema.statusSnapshots.takenAt, now - 86400_000));
+  await db.delete(schema.rpcCache).where(lt(schema.rpcCache.fetchedAt, now - 86400_000));
 
   // 3) best effort: backfill daily pool snapshots from real block valuePools, within budget
   const have = new Set((await db.select({ d: schema.poolSnapshots.date }).from(schema.poolSnapshots)).map((r) => r.d));
@@ -129,7 +134,7 @@ export async function lastIngestAt(): Promise<number | null> {
   return r ? Number(r.value) : null;
 }
 
-const LEASE_MS = 55_000;
+const LEASE_MS = 120_000; // longer than any run; runs are 5 min apart anyway
 const RATE_LIMIT_BACKOFF_MS = 30_000; // shared-tier hiccups clear quickly; retry soon
 const UNREACHABLE_BACKOFF_MS = 20_000;
 
@@ -158,6 +163,12 @@ export async function rpcHealth(): Promise<Degraded | null> {
 
 async function recordFailure(e: unknown, now: number) {
   const prev = await rpcHealth().catch(() => null);
+  if (e instanceof RpcQuotaExhausted) {
+    const d: Degraded = { reason: "quota_exhausted", since: prev?.since ?? now, retryAt: e.resetAt, detail: "Node provider daily quota used up (HTTP 402)" };
+    await setMeta("rpcHealth", JSON.stringify(d));
+    console.warn(`[ingest] quota_exhausted; next attempt ${new Date(e.resetAt).toISOString()}`);
+    return;
+  }
   const limited = e instanceof RpcRateLimited && e.status === 429;
   const providerErr = e instanceof RpcRateLimited && e.status !== 429;
   const ra = e instanceof RpcRateLimited ? e.retryAfterSec : null;
@@ -176,7 +187,7 @@ export async function ingestIfDue(opts: IngestOptions & { maxAgeMs?: number; for
     const rows = await db.select().from(schema.meta).where(inArray(schema.meta.key, ["lastIngestAt", "rpcHealth"]));
     const m = new Map(rows.map((r) => [r.key, r.value]));
     const last = Number(m.get("lastIngestAt") ?? 0);
-    if (!opts.force && now - last < (opts.maxAgeMs ?? 60_000)) return null;
+    if (!opts.force && now - last < (opts.maxAgeMs ?? INGEST_INTERVAL_MS)) return null;
     const health = m.get("rpcHealth") ? (JSON.parse(m.get("rpcHealth") as string) as Degraded) : null;
     if (health?.retryAt && now < health.retryAt) return null; // provider told us to back off
     if (!(await acquireLease(now))) return null; // another instance is ingesting
@@ -191,8 +202,11 @@ export async function ingestIfDue(opts: IngestOptions & { maxAgeMs?: number; for
 }
 
 /** Never blocks a page/API response on the provider: refresh runs after the response is sent. */
-export async function ensureFresh(maxAgeMs = 60_000): Promise<void> {
+let nextCheckAt = 0; // per-instance: don't even read meta from the DB more than once a minute
+export async function ensureFresh(maxAgeMs = INGEST_INTERVAL_MS): Promise<void> {
   if (!dbAvailable()) return; // nowhere to store results
+  if (Date.now() < nextCheckAt) return;
+  nextCheckAt = Date.now() + 60_000;
   try {
     after(() => ingestIfDue({ maxAgeMs }));
   } catch {
