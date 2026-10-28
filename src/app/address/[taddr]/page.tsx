@@ -13,7 +13,7 @@ export default async function AddressPage({ params }: { params: Promise<{ taddr:
   const v = taddrSchema.safeParse(taddr);
   if (!v.success) notFound();
   const a = await getAddressInfo(v.data).catch(() => null);
-  if (!a) return <Notice tone="error" title="Node unreachable">Couldn&apos;t reach the Zcash node. Try again shortly.</Notice>;
+  if (!a) throw new Error("node_unreachable"); // real error status (not 200); error.tsx explains
   return (
     <div>
       <PageTitle eyebrow={v.data.startsWith("t3") ? "Transparent address (P2SH)" : "Transparent address (P2PKH)"} title={<HashValue value={a.address} label="address" />} />

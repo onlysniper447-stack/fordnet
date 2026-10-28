@@ -95,6 +95,14 @@ One pure function (`deriveState` in `src/lib/state.ts`, unit-tested in `tests/st
 
 `degraded` is `null` while data is < 5 min old, otherwise `{ reason: rate_limited | provider_error | unreachable | stale, since, retryAt }`. A hiccup while data is still fresh is only exposed as `providerNote` in the raw JSON.
 
+### When the database is unavailable
+`src/lib/dbguard.ts` is a circuit breaker around every Postgres call. When Neon refuses (e.g. HTTP 402 "exceeded the quota") or is unreachable, it opens for 60s (15s for transient errors) and Fordnet degrades instead of breaking:
+- Status on `/`, `/dashboard`, `/analytics` and `/api/v1/network/status` comes straight from the node (`getblockchaininfo` + tip block, memoised 30s per instance) and carries `storage: "<reason>"`; the dashboard shows "Live from node · storage paused".
+- Recent blocks are read from the node (max 10, memoised 60s). Block/tx/address lookups use a per-instance memory cache. Unknown ids are still 404.
+- Pool history needs stored snapshots: the chart shows "Pool history temporarily unavailable" and the API returns `503 storage_unavailable`.
+- API keys verify by their HMAC tag (the revocation list is unavailable until the DB recovers) and the daily limit is counted per instance. Ingest pauses.
+- A detail lookup that fails because the node is unreachable returns an error status (HTTP 500 page; the API returns 503), never a 200.
+
 ### GetBlock shared tier notes
 The shared endpoint answers single calls in about 1–4s, but rate-limits bursts (40 parallel calls → 14×200, 20×429, 5×503, 1 timeout) and intermittently returns `503 Service temporarily unavailable` after ~10s. No daily quota exhaustion was observed and it sends no `Retry-After`. Fordnet therefore keeps RPC volume to one serial ingest per minute plus cache misses. Address fetches are sequential (≤10 txs). A second RPC URL as a fallback would add resilience but is not required.
 

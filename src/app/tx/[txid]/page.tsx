@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { Card, Field, Notice, PageTitle, Raw } from "@/components/ui";
+import { Card, Field, PageTitle, Raw } from "@/components/ui";
 import { HashValue } from "@/components/copy";
 import { hex64Schema } from "@/lib/detect";
 import { getTxDetail } from "@/lib/service";
@@ -13,7 +13,7 @@ export default async function TxPage({ params }: { params: Promise<{ txid: strin
   const v = hex64Schema.safeParse(txid);
   if (!v.success) notFound();
   const t = await getTxDetail(v.data).catch(() => undefined);
-  if (t === undefined) return <Notice tone="error" title="Node unreachable">Couldn&apos;t reach the Zcash node. Try again shortly.</Notice>;
+  if (t === undefined) throw new Error("node_unreachable"); // real error status (not 200); error.tsx explains
   if (!t) notFound();
   const sh = t.shielded;
   const shieldedTotal = sh.saplingSpends + sh.saplingOutputs + sh.orchardActions + sh.sproutJoinSplits;

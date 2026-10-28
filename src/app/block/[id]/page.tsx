@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { Card, Field, Notice, PageTitle, Raw } from "@/components/ui";
+import { Card, Field, PageTitle, Raw } from "@/components/ui";
 import { HashValue } from "@/components/copy";
 import { heightOrHashSchema } from "@/lib/detect";
 import { getBlockDetail } from "@/lib/service";
@@ -13,7 +13,7 @@ export default async function BlockPage({ params }: { params: Promise<{ id: stri
   const v = heightOrHashSchema.safeParse(id);
   if (!v.success) notFound(); // malformed ids get a 400 from middleware before reaching here
   const b = await getBlockDetail(String(v.data)).catch(() => undefined);
-  if (b === undefined) return <Notice tone="error" title="Node unreachable">We couldn&apos;t reach the Zcash node and this block isn&apos;t cached. Try again in a minute.</Notice>;
+  if (b === undefined) throw new Error("node_unreachable"); // real error status (not 200); error.tsx explains
   if (!b) notFound();
   return (
     <div>

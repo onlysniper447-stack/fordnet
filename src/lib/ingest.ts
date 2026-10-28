@@ -5,6 +5,7 @@ import { getRpc, RpcRateLimited } from "./rpc";
 import { poolsFrom } from "./pools";
 import type { Degraded, NetworkStatus, RpcBlock, RpcBlockchainInfo } from "./types";
 import { syncState } from "./state";
+import { dbAvailable } from "./dbguard";
 export { syncState, LAG_THRESHOLD_SEC } from "./state";
 
 const BLOCKS_PER_DAY = 1152; // 75s target spacing
@@ -191,6 +192,7 @@ export async function ingestIfDue(opts: IngestOptions & { maxAgeMs?: number; for
 
 /** Never blocks a page/API response on the provider: refresh runs after the response is sent. */
 export async function ensureFresh(maxAgeMs = 60_000): Promise<void> {
+  if (!dbAvailable()) return; // nowhere to store results
   try {
     after(() => ingestIfDue({ maxAgeMs }));
   } catch {

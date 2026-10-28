@@ -117,6 +117,8 @@ export interface NetworkStatus {
   degraded: Degraded | null; // set when data is older than 5 min
   /** Last provider hiccup, informational only (raw JSON); never changes the state by itself. */
   providerNote?: Degraded | null;
+  /** Set when the database is unavailable and the status comes straight from the node. */
+  storage?: string | null;
 }
 
 export interface BlockSummary {

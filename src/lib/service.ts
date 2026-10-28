@@ -3,7 +3,9 @@ import { after } from "next/server";
 import { getDb, schema } from "@/db";
 import { getRpc } from "./rpc";
 import { ensureFresh, latestSnapshot, rpcHealth } from "./ingest";
-import { deriveState } from "./state";
+import { deriveState, syncState } from "./state";
+import { dbAvailable, storageNote, StorageUnavailable, withDb } from "./dbguard";
+import { poolsFrom } from "./pools";
 import type { AddressInfo, BlockDetail, BlockSummary, NetworkStatus, PoolPoint, PoolRange, RpcBlock, RpcTx, TxDetail, TxSummary } from "./types";
 
 const EMPTY_POOLS = { transparent: null, sprout: null, sapling: null, orchard: null, lockbox: null, ironwood: null };
@@ -18,6 +20,44 @@ export async function getNetworkStatus(): Promise<NetworkStatus> {
   return v;
 }
 async function buildStatus(): Promise<NetworkStatus> {
+  return withDb(fromDb, () => liveStatus());
+}
+
+let liveCache: { at: number; v: NetworkStatus } | null = null;
+let liveInflight: Promise<NetworkStatus> | null = null;
+/** Database down: read the tip straight from the node (memoised 30s, single-flight per instance). */
+async function liveStatus(): Promise<NetworkStatus> {
+  if (liveCache && Date.now() - liveCache.at < 30_000) return { ...liveCache.v, storage: storageNote() };
+  liveInflight ??= (async () => {
+    const rpc = getRpc();
+    try {
+      const info = await rpc.getBlockchainInfo().catch(async (e: unknown) => {
+        console.warn(`[live] getblockchaininfo failed, retrying once: ${e instanceof Error ? e.message : String(e)}`);
+        await new Promise((r) => setTimeout(r, 1000));
+        return rpc.getBlockchainInfo();
+      });
+      const tip = await rpc.getBlock(String(info.blocks), 1).catch(() => null);
+      const solps = await rpc.getNetworkSolPs().catch(() => null);
+      const now = Date.now();
+      const v: NetworkStatus = {
+        state: syncState(tip?.time ?? null, info.blocks, info.headers ?? null, now), live: true, mocked: rpc.mocked, chain: info.chain,
+        height: info.blocks, headers: info.headers ?? null, bestBlockHash: info.bestblockhash, hashrateSolPerSec: solps, difficulty: info.difficulty ?? null,
+        lastBlockTime: tip?.time ?? null, lastBlockTxCount: tip?.tx.length ?? null, verificationProgress: info.verificationprogress ?? null,
+        pools: poolsFrom(info.valuePools ?? tip?.valuePools), snapshotAt: now, degraded: null, providerNote: null, storage: storageNote(),
+      };
+      liveCache = { at: now, v };
+      return v;
+    } catch (e) {
+      console.warn(`[live] node unreachable: ${(e instanceof Error ? e.message : String(e)).replace(/https?:\/\/\S+/g, "[url]")}`);
+      const health = { reason: "unreachable" as const, since: liveCache?.v.snapshotAt ?? null, retryAt: Date.now() + 30_000, detail: (e instanceof Error ? e.message : String(e)).replace(/https?:\/\/\S+/g, "[url]").slice(0, 200) };
+      const base = liveCache?.v ?? { mocked: rpc.mocked, chain: null, height: null, headers: null, bestBlockHash: null, hashrateSolPerSec: null, difficulty: null, lastBlockTime: null, lastBlockTxCount: null, verificationProgress: null, pools: EMPTY_POOLS, snapshotAt: null };
+      return { ...base, ...deriveState(base, health), storage: storageNote() } as NetworkStatus;
+    }
+  })().finally(() => { liveInflight = null; });
+  return liveInflight;
+}
+
+async function fromDb(): Promise<NetworkStatus> {
   await ensureFresh();
   const [snap, health] = await Promise.all([latestSnapshot(), rpcHealth().catch(() => null)]);
   const d = deriveState(snap, health);
@@ -29,10 +69,18 @@ async function buildStatus(): Promise<NetworkStatus> {
 
 /** Read-through cache in Postgres so repeat lookups don't hit the RPC provider. Serves stale on failure. */
 async function cached<T>(key: string, ttlMs: number, fetcher: () => Promise<T | null>): Promise<T | null> {
-  const db = await getDb();
-  const [row] = await db.select().from(schema.rpcCache).where(eq(schema.rpcCache.key, key)).limit(1);
+  type Row = { value: string; fetchedAt: number } | undefined;
+  const row = await withDb<Row>(async () => (await (await getDb()).select().from(schema.rpcCache).where(eq(schema.rpcCache.key, key)).limit(1))[0], () => undefined);
+  if (!dbAvailable()) { // storage down: per-instance memory cache only
+    const m = memCache.get(key);
+    if (m && Date.now() - m.at < ttlMs) return m.v as T;
+    const v = await fetcher();
+    if (v !== null) { memCache.set(key, { at: Date.now(), v }); if (memCache.size > 500) memCache.delete(memCache.keys().next().value as string); }
+    return v;
+  }
   const refresh = async (): Promise<T | null> => {
     const v = await fetcher();
+    const db = await getDb();
     if (v !== null) {
       const value = JSON.stringify(v); const fetchedAt = Date.now();
       await db.insert(schema.rpcCache).values({ key, value, fetchedAt }).onConflictDoUpdate({ target: schema.rpcCache.key, set: { value, fetchedAt } });
@@ -51,8 +99,24 @@ async function cached<T>(key: string, ttlMs: number, fetcher: () => Promise<T | 
   return refresh();
 }
 const refreshing = new Set<string>();
+const memCache = new Map<string, { at: number; v: unknown }>();
 
+let recentCache: { at: number; v: BlockSummary[] } | null = null;
 export async function getRecentBlocks(limit: number): Promise<BlockSummary[]> {
+  return withDb(() => recentFromDb(limit), async () => {
+    if (recentCache && Date.now() - recentCache.at < 60_000 && recentCache.v.length >= Math.min(limit, 10)) return recentCache.v.slice(0, limit);
+    const rpc = getRpc(); const tip = (await liveStatus()).height;
+    if (tip === null) throw new Error("node unreachable");
+    const out: BlockSummary[] = [];
+    for (let h = tip; h > tip - Math.min(limit, 10) && h >= 0; h--) { // capped: gentle on the shared node
+      const b = await rpc.getBlock(String(h), 1).catch(() => null);
+      if (b) out.push({ height: b.height, hash: b.hash, time: b.time, size: b.size ?? null, txCount: b.tx.length });
+    }
+    recentCache = { at: Date.now(), v: out };
+    return out;
+  });
+}
+async function recentFromDb(limit: number): Promise<BlockSummary[]> {
   await ensureFresh();
   return (await getDb()).select({ height: schema.blocks.height, hash: schema.blocks.hash, time: schema.blocks.time, size: schema.blocks.size, txCount: schema.blocks.txCount })
     .from(schema.blocks).orderBy(desc(schema.blocks.height)).limit(limit);
@@ -69,12 +133,11 @@ function summarizeTx(t: RpcTx): TxSummary {
 }
 
 export async function getBlockDetail(id: string): Promise<BlockDetail | null> {
-  const db = await getDb();
   const isHeight = /^\d+$/.test(id);
-  const [row] = await db.select().from(schema.blocks).where(isHeight ? eq(schema.blocks.height, Number(id)) : eq(schema.blocks.hash, id)).limit(1);
+  const row = await withDb(async () => (await (await getDb()).select().from(schema.blocks).where(isHeight ? eq(schema.blocks.height, Number(id)) : eq(schema.blocks.hash, id)).limit(1))[0], () => undefined);
   const b: RpcBlock | null = row ? (JSON.parse(row.raw) as RpcBlock) : await cached(`block:${id}`, 10 * 60_000, () => getRpc().getBlock(id));
   if (!b) return null;
-  const tip = (await latestSnapshot())?.height ?? null;
+  const tip = await withDb(async () => (await latestSnapshot())?.height ?? null, async () => (await liveStatus()).height);
   return {
     height: b.height, hash: b.hash, time: b.time, size: b.size ?? null, txCount: b.tx.length,
     confirmations: tip !== null && tip >= b.height ? tip - b.height + 1 : b.confirmations ?? null,
@@ -124,6 +187,9 @@ async function fetchAddressInfo(address: string): Promise<AddressInfo> {
 }
 
 export async function getPoolHistory(range: PoolRange): Promise<{ points: PoolPoint[]; updatedAt: number | null }> {
+  return withDb(() => poolsFromDb(range), () => { throw new StorageUnavailable(storageNote() ?? "Database unavailable"); });
+}
+async function poolsFromDb(range: PoolRange): Promise<{ points: PoolPoint[]; updatedAt: number | null }> {
   await ensureFresh();
   const db = await getDb();
   const since = range === "all" ? "0000-00-00" : new Date(Date.now() - (range === "7d" ? 7 : 30) * 86400_000).toISOString().slice(0, 10);

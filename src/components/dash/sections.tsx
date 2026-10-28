@@ -4,6 +4,7 @@ import { StatusPill } from "@/components/status";
 import { HashValue } from "@/components/copy";
 import { PoolChart } from "@/components/pool-chart";
 import { getNetworkStatus, getPoolHistory, getRecentBlocks } from "@/lib/service";
+import { StorageUnavailable } from "@/lib/dbguard";
 import { fmtHashrate, fmtInt, fmtUtc, shortHash, timeAgo, fmtBytes, NR } from "@/lib/format";
 import { isMocked } from "@/lib/rpc";
 
@@ -27,6 +28,7 @@ export async function StatusSection() {
         <div className="flex h-8 min-w-0 items-center gap-3">
           <StatusPill state={s.state} />
           {s.state === "lagging" && s.live && <span className="truncate text-xs text-warn">No block for 5+ min — usually normal variance</span>}
+          {s.storage && s.state !== "lagging" && <span className="truncate text-xs text-muted">Live from node · storage paused</span>}
         </div>
         <p className="mt-1 h-4 truncate text-xs text-muted">{s.mocked ? "Source: MOCKED RPC" : `Source: Zcash node (${s.chain ?? "chain " + NR})`} · updated <span className="num">{s.snapshotAt ? new Date(s.snapshotAt).toISOString().slice(11, 19) + " UTC" : NR}</span></p>
       </div>
@@ -81,7 +83,9 @@ export function BlocksSkeleton() {
 }
 
 export async function PoolSection() {
-  const { points, updatedAt } = await getPoolHistory("all");
+  const h = await getPoolHistory("all").catch((e: unknown) => (e instanceof StorageUnavailable ? e : Promise.reject(e)));
+  if (h instanceof StorageUnavailable) return <Notice tone="warn" title="Pool history temporarily unavailable">{h.message}. Live status above comes straight from the node.</Notice>;
+  const { points, updatedAt } = h;
   return <PoolChart points={points} updatedAt={updatedAt} source={isMocked() ? "MOCKED RPC" : "Zcash node"} />;
 }
 export function PoolSkeleton() {

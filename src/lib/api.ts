@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { verifyApiKey, DbCounterStore } from "./apikeys";
 import { checkRateLimit, type RateLimitResult } from "./ratelimit";
 import { isMocked } from "./rpc";
+import { StorageUnavailable } from "./dbguard";
 
 export interface ApiError { code: string; message: string }
 export interface ApiEnvelope<T> { data: T | null; meta: Record<string, unknown>; error: ApiError | null }
@@ -43,6 +44,7 @@ export async function handleV1<T>(req: NextRequest, produce: () => Promise<T>, o
   } catch (e) {
     if (e instanceof BadRequest) return apiError(400, "bad_request", e.message, headers);
     if (e instanceof NotFound) return apiError(404, "not_found", e.message, headers);
+    if (e instanceof StorageUnavailable) return apiError(503, "storage_unavailable", `${e.message}. Try again later.`, headers);
     return apiError(503, "upstream_unavailable", "The Zcash node did not respond (8s timeout, retried once). Try again shortly.", headers);
   }
 }
