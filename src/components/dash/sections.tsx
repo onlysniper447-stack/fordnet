@@ -34,7 +34,7 @@ export async function StatusSection() {
           </Notice>
         </div>
       )}
-      {s.state === "lagging" && s.live && <div className="mb-4"><Notice tone="warn" title="Node is lagging">Last block is more than 2 minutes old{s.headers !== null && s.height !== null && s.headers > s.height ? ` and ${s.headers - s.height} headers are not yet validated` : ""}. Zcash targets 75s blocks, so short gaps are normal.</Notice></div>}
+      {s.state === "lagging" && s.live && <div className="mb-4"><Notice tone="warn" title="Node is lagging">Last block is more than 5 minutes old{s.headers !== null && s.height !== null && s.headers > s.height ? ` and ${s.headers - s.height} headers are not yet validated` : ""}. Zcash targets 75s blocks, so short gaps are normal.</Notice></div>}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="Block height" value={fmtInt(s.height)} detail={s.headers !== null ? <>headers <span className="num">{fmtInt(s.headers)}</span></> : "headers not reported"} />
         <Stat label="Network hashrate" value={hr.value} unit={hr.unit} detail={s.difficulty !== null ? <>difficulty <span className="num">{fmtInt(Math.round(s.difficulty))}</span></> : "difficulty not reported"} />

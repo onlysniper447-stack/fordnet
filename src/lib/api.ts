@@ -26,9 +26,9 @@ export class NotFound extends Error {}
 export async function handleV1<T>(req: NextRequest, produce: () => Promise<T>, opts: { cache?: boolean } = { cache: true }) {
   const key = req.headers.get("x-api-key");
   if (!key) return apiError(401, "missing_api_key", "Send your API key in the x-api-key header. Get one free at /developers.");
-  const keyHash = verifyApiKey(key);
+  const keyHash = await verifyApiKey(key);
   if (!keyHash) return apiError(401, "invalid_api_key", "API key not recognised. Generate a new one at /developers.");
-  const rl = checkRateLimit(store, `key:${keyHash}`);
+  const rl = await checkRateLimit(store, `key:${keyHash}`);
   if (!rl.allowed) return apiError(429, "rate_limited", `Daily limit of ${rl.limit} requests reached. Retry after ${rl.retryAfterSec}s (UTC midnight).`, { ...rlHeaders(rl), "Retry-After": String(rl.retryAfterSec) });
   const headers = { ...rlHeaders(rl), "Cache-Control": opts.cache === false ? "no-store" : "private, max-age=30" };
   const ck = req.nextUrl.pathname + req.nextUrl.search;

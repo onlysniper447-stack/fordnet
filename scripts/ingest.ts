@@ -6,7 +6,7 @@ const INTERVAL = 60_000;
 async function tick() {
   const t = Date.now();
   try {
-    const r = await runIngest();
+    const r = await runIngest(once ? { maxNewBlocks: 100, maxBackfillPerRun: 30 } : {});
     console.log(`[ingest] ${new Date().toISOString()} height=${r.height} newBlocks=${r.newBlocks} poolDays=${r.poolDaysWritten}${r.mocked ? " (MOCKED RPC)" : ""} ${Date.now() - t}ms`);
   } catch (e) {
     console.error(`[ingest] ${new Date().toISOString()} failed: ${e instanceof Error ? e.message : String(e)}`);

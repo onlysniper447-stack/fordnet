@@ -28,7 +28,7 @@ async function fetchNetworkStatus(): Promise<NetworkStatus> {
       pools: poolsFrom(info.valuePools), snapshotAt: Date.now(),
     };
   } catch {
-    const snap = latestSnapshot();
+    const snap = await latestSnapshot();
     if (snap) return { ...snap, state: "unreachable", live: false };
     return { state: "unreachable", live: false, mocked: rpc.mocked, chain: null, height: null, headers: null, bestBlockHash: null, hashrateSolPerSec: null, difficulty: null, lastBlockTime: null, lastBlockTxCount: null, verificationProgress: null, pools: EMPTY_POOLS, snapshotAt: null };
   }
@@ -36,8 +36,8 @@ async function fetchNetworkStatus(): Promise<NetworkStatus> {
 
 export async function getRecentBlocks(limit: number): Promise<BlockSummary[]> {
   await ensureFresh();
-  return getDb().select({ height: schema.blocks.height, hash: schema.blocks.hash, time: schema.blocks.time, size: schema.blocks.size, txCount: schema.blocks.txCount })
-    .from(schema.blocks).orderBy(desc(schema.blocks.height)).limit(limit).all();
+  return (await getDb()).select({ height: schema.blocks.height, hash: schema.blocks.hash, time: schema.blocks.time, size: schema.blocks.size, txCount: schema.blocks.txCount })
+    .from(schema.blocks).orderBy(desc(schema.blocks.height)).limit(limit);
 }
 
 function summarizeTx(t: RpcTx): TxSummary {
@@ -51,9 +51,9 @@ function summarizeTx(t: RpcTx): TxSummary {
 }
 
 export async function getBlockDetail(id: string): Promise<BlockDetail | null> {
-  const db = getDb();
+  const db = await getDb();
   const isHeight = /^\d+$/.test(id);
-  const row = db.select().from(schema.blocks).where(isHeight ? eq(schema.blocks.height, Number(id)) : eq(schema.blocks.hash, id)).get();
+  const [row] = await db.select().from(schema.blocks).where(isHeight ? eq(schema.blocks.height, Number(id)) : eq(schema.blocks.hash, id)).limit(1);
   let b: RpcBlock | null = row ? (JSON.parse(row.raw) as RpcBlock) : null;
   try { b = (await getRpc().getBlock(id)) ?? (row ? b : null); } catch { /* use cached row */ }
   if (!b) return null;
@@ -100,9 +100,9 @@ export async function getAddressInfo(address: string): Promise<AddressInfo> {
 
 export async function getPoolHistory(range: PoolRange): Promise<{ points: PoolPoint[]; updatedAt: number | null }> {
   await ensureFresh();
-  const db = getDb();
+  const db = await getDb();
   const since = range === "all" ? "0000-00-00" : new Date(Date.now() - (range === "7d" ? 7 : 30) * 86400_000).toISOString().slice(0, 10);
-  const rows = db.select().from(schema.poolSnapshots).where(gte(schema.poolSnapshots.date, since)).orderBy(schema.poolSnapshots.date).all();
+  const rows = await db.select().from(schema.poolSnapshots).where(gte(schema.poolSnapshots.date, since)).orderBy(schema.poolSnapshots.date);
   return {
     points: rows.map((r) => ({ date: r.date, height: r.height, transparent: r.transparent, sprout: r.sprout, sapling: r.sapling, orchard: r.orchard, lockbox: r.lockbox, ironwood: r.ironwood })),
     updatedAt: rows.reduce<number | null>((m, r) => (m === null || r.takenAt > m ? r.takenAt : m), null),

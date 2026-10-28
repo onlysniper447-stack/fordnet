@@ -1,44 +1,44 @@
-import { sqliteTable, text, integer, real, primaryKey } from "drizzle-orm/sqlite-core";
+import { pgTable, text, integer, bigint, doublePrecision, serial, primaryKey } from "drizzle-orm/pg-core";
 
-export const blocks = sqliteTable("blocks", {
+export const blocks = pgTable("blocks", {
   height: integer("height").primaryKey(),
   hash: text("hash").notNull().unique(),
-  time: integer("time").notNull(),
+  time: bigint("time", { mode: "number" }).notNull(),
   size: integer("size"),
   txCount: integer("tx_count").notNull(),
-  raw: text("raw").notNull(), // JSON of RpcBlock (verbosity 2)
+  raw: text("raw").notNull(), // JSON of RpcBlock (verbosity 2, tx hex stripped)
 });
 
-export const statusSnapshots = sqliteTable("status_snapshots", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  takenAt: integer("taken_at").notNull(), // unix ms
+export const statusSnapshots = pgTable("status_snapshots", {
+  id: serial("id").primaryKey(),
+  takenAt: bigint("taken_at", { mode: "number" }).notNull(), // unix ms
   json: text("json").notNull(), // NetworkStatus
 });
 
-export const poolSnapshots = sqliteTable("pool_snapshots", {
+export const poolSnapshots = pgTable("pool_snapshots", {
   date: text("date").primaryKey(), // YYYY-MM-DD UTC
   height: integer("height").notNull(),
-  takenAt: integer("taken_at").notNull(),
-  transparent: real("transparent"),
-  sprout: real("sprout"),
-  sapling: real("sapling"),
-  orchard: real("orchard"),
-  lockbox: real("lockbox"),
-  ironwood: real("ironwood"),
+  takenAt: bigint("taken_at", { mode: "number" }).notNull(),
+  transparent: doublePrecision("transparent"),
+  sprout: doublePrecision("sprout"),
+  sapling: doublePrecision("sapling"),
+  orchard: doublePrecision("orchard"),
+  lockbox: doublePrecision("lockbox"),
+  ironwood: doublePrecision("ironwood"),
 });
 
-export const apiKeys = sqliteTable("api_keys", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const apiKeys = pgTable("api_keys", {
+  id: serial("id").primaryKey(),
   hash: text("hash").notNull().unique(), // sha256 of key; plaintext never stored
   prefix: text("prefix").notNull(),
   label: text("label"),
-  createdAt: integer("created_at").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
 });
 
-export const rateLimits = sqliteTable("rate_limits", {
+export const rateLimits = pgTable("rate_limits", {
   bucket: text("bucket").notNull(),
   day: text("day").notNull(),
   count: integer("count").notNull(),
 }, (t) => [primaryKey({ columns: [t.bucket, t.day] })]);
 
-export const meta = sqliteTable("meta", { key: text("key").primaryKey(), value: text("value").notNull() });
+export const meta = pgTable("meta", { key: text("key").primaryKey(), value: text("value").notNull() });

@@ -10,11 +10,12 @@
     "ingest": "tsx scripts/ingest.ts",
     "ingest:once": "tsx scripts/ingest.ts --once",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:push": "drizzle-kit push"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.2.0",
     "@radix-ui/react-slot": "^1.5.0",
-    "better-sqlite3": "^12.11.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.4",
@@ -30,13 +31,13 @@
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
-    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "drizzle-kit": "^0.31.11",
     "eslint": "^9",
     "eslint-config-next": "15.5.28",
+    "pg": "^8.23.1",
     "tailwindcss": "^4",
     "tsx": "^4.23.15",
     "typescript": "^5",
