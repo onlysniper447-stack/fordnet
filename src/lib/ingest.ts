@@ -191,7 +191,9 @@ export async function ingestIfDue(opts: IngestOptions & { maxAgeMs?: number; for
     const last = Number(m.get("lastIngestAt") ?? 0);
     if (!opts.force && now - last < (opts.maxAgeMs ?? INGEST_INTERVAL_MS)) return null;
     const health = m.get("rpcHealth") ? (JSON.parse(m.get("rpcHealth") as string) as Degraded) : null;
-    if (health?.retryAt && now < health.retryAt) return null; // provider told us to back off
+    // provider told us to back off; a daily-quota lockout of the primary doesn't stop the fallback endpoint
+    const fallbackCovers = health?.reason === "quota_exhausted" && Boolean(process.env.ZCASH_RPC_URL_FALLBACK);
+    if (health?.retryAt && now < health.retryAt && !fallbackCovers) return null;
     if (!(await acquireLease(now))) return null; // another instance is ingesting
     const r = await runIngest(opts);
     if (health) await setMeta("rpcHealth", "");
@@ -209,8 +211,7 @@ export async function ensureFresh(maxAgeMs = INGEST_INTERVAL_MS): Promise<void> 
   if (!dbAvailable()) return; // nowhere to store results
   if (Date.now() < nextCheckAt) return;
   nextCheckAt = Date.now() + 60_000;
-  const flush = () => flushUsage(async (day, n) => { // one cheap upsert per instance per minute
-    const key = `rpcCalls:${day}`;
+  const flush = () => flushUsage(async (key, n) => { // one cheap upsert per pool per instance per minute
     const [r] = await (await getDb()).insert(schema.meta).values({ key, value: String(n) })
       .onConflictDoUpdate({ target: schema.meta.key, set: { value: sql`(${schema.meta.value}::bigint + ${n})::text` } }).returning({ value: schema.meta.value });
     return Number(r.value);

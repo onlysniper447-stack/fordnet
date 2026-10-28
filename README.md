@@ -35,6 +35,8 @@ pnpm build
 |---|---|
 | `ZCASH_RPC_URL` | zcashd/Zebra JSON-RPC URL. Empty → MOCKED client |
 | `ZCASH_RPC_URL_FALLBACK` | Optional second JSON-RPC URL, used automatically when the primary times out or returns 429/503 |
+| `ZCASH_RPC_FALLBACK_API_KEY` | Sent as the `api-key` header to the fallback (NOWNodes); header name via `ZCASH_RPC_FALLBACK_API_KEY_HEADER`, or arbitrary headers via `ZCASH_RPC_FALLBACK_HEADERS` (`"Name: value; Other: value"` or JSON) |
+| `RPC_FALLBACK_DAILY_BUDGET` | Daily call cap for the fallback (default 3000 ≈ NOWNodes Start 100k/month) |
 | `ZCASH_RPC_TIMEOUT_MS` | Per-call timeout (default 8000) |
 | `ZCASH_RPC_USER`, `ZCASH_RPC_PASS` | Basic-auth credentials |
 | `ZCASH_MOCK` | `1` forces mock even with a URL |
@@ -119,6 +121,9 @@ One pure function (`deriveState` in `src/lib/state.ts`, unit-tested in `tests/st
 
 ### Provider quota (HTTP 402)
 GetBlock's free plan has a daily compute-unit budget (50,000 CU, topped up daily at 07:30 UTC per GetBlock's docs). When it is used up the endpoint answers `402 Out of CU`. Fordnet then stops calling that URL until the reset (`ZCASH_RPC_QUOTA_RESET_UTC`, default `07:30`), records `degraded.reason = "quota_exhausted"` with `retryAt` = the reset, keeps serving stored data and shows "Data delayed — node provider daily quota used up (resets 07:30 UTC)" (amber, not red). If `ZCASH_RPC_URL_FALLBACK` is set it is used meanwhile. Lookup pages are the main CU cost (an address page is up to 7 calls), so `robots.txt` keeps crawlers off `/address/`, `/tx/`, `/block/` and `/search`, and address pages fetch the 5 most recent transactions.
+
+### Fallback node: NOWNodes
+Production uses NOWNodes (`https://zec.nownodes.io`, `api-key` header) as `ZCASH_RPC_URL_FALLBACK`. Each endpoint has its own quota lockout and daily budget, so GetBlock's 402 "Out of CU" lockout never blocks the fallback, and an ingest backoff caused by the primary's quota is skipped while a fallback is configured. A 401/403 (bad or inactive key) is not retried. Tested methods on NOWNodes Zcash (Zebra-style): `getblockchaininfo` (with `valuePools`), `getblock` verbosity 1 and 2 (with `valuePools`), `getblockcount`, `getbestblockhash`, `getmininginfo` (has `networksolps`), `getrawtransaction` verbose, out-of-range heights answer `-8`. Not available (HTTP 405): `getnetworksolps` (hashrate falls back to `getmininginfo`), `getaddressbalance`, `getaddresstxids`, `getaddressdeltas` (address pages show "not reported" while on the fallback).
 
 ### GetBlock shared tier notes
 The shared endpoint answers single calls in about 1–4s, but rate-limits bursts (40 parallel calls → 14×200, 20×429, 5×503, 1 timeout) and intermittently returns `503 Service temporarily unavailable` after ~10s. No daily quota exhaustion was observed and it sends no `Retry-After`. Fordnet therefore keeps RPC volume to one serial ingest per 5 minutes, a 60s-memoised tip check, plus cache misses. Address fetches are sequential (≤10 txs). A second RPC URL as a fallback would add resilience but is not required.
