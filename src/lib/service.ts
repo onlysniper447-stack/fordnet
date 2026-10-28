@@ -6,6 +6,13 @@ import { ensureFresh, latestSnapshot, rpcHealth } from "./ingest";
 import { deriveState, syncState } from "./state";
 import { dbAvailable, storageNote, StorageUnavailable, withDb } from "./dbguard";
 import { poolsFrom } from "./pools";
+import { BudgetExhausted, lookupBudgetOk } from "./rpc-budget";
+
+/** Lookups stop at their share of the daily node-call budget (cached results are still served). */
+async function lookupGuard<T>(fn: () => Promise<T>): Promise<T> {
+  if (!lookupBudgetOk()) throw new BudgetExhausted("lookup");
+  return fn();
+}
 import type { AddressInfo, BlockDetail, BlockSummary, NetworkStatus, PoolPoint, PoolRange, RpcBlock, RpcTx, TxDetail, TxSummary } from "./types";
 
 const EMPTY_POOLS = { transparent: null, sprout: null, sapling: null, orchard: null, lockbox: null, ironwood: null };
@@ -60,7 +67,7 @@ async function liveStatus(): Promise<NetworkStatus> {
 let tipCache: { at: number; height: number; hash: string; time: number; txCount: number } | null = null;
 /** Cheap live tip for the pill between 5-min ingests: getblockcount (+ one getblock v1 only when the tip moved). Memoised 60s. */
 async function liveTip(known: NetworkStatus | null) {
-  if (tipCache && Date.now() - tipCache.at < 60_000) return tipCache;
+  if (tipCache && Date.now() - tipCache.at < 120_000) return tipCache;
   const rpc = getRpc();
   const height = await rpc.getBlockCount();
   if (tipCache && tipCache.height === height) return (tipCache = { ...tipCache, at: Date.now() });
@@ -79,7 +86,7 @@ async function fromDb(): Promise<NetworkStatus> {
     snapCache = { at: Date.now(), snap: s, health: h };
   }
   let { snap } = snapCache; const { health } = snapCache;
-  if (snap && snap.snapshotAt !== null && Date.now() - snap.snapshotAt > 90_000) {
+  if (snap && snap.snapshotAt !== null && Date.now() - snap.snapshotAt > 150_000) {
     // overlay the live tip so the pill reflects the chain now, not the last ingest
     const t = await liveTip(snap).catch(() => null);
     if (t) snap = { ...snap, height: t.height, headers: t.height > (snap.headers ?? 0) ? t.height : snap.headers, bestBlockHash: t.hash, lastBlockTime: t.time, lastBlockTxCount: t.txCount, snapshotAt: t.at };
@@ -173,7 +180,7 @@ export async function getBlockDetail(id: string): Promise<BlockDetail | null> {
     const known = await withDb(async () => (await latestSnapshot())?.height ?? null, () => liveCache?.v.height ?? null);
     if (known !== null && Number(id) > known + 1000) return null;
   }
-  const b: RpcBlock | null = row ? (JSON.parse(row.raw) as RpcBlock) : await cached(`block:${id}`, 10 * 60_000, () => getRpc().getBlock(id));
+  const b: RpcBlock | null = row ? (JSON.parse(row.raw) as RpcBlock) : await cached(`block:${id}`, 10 * 60_000, () => lookupGuard(() => getRpc().getBlock(id)));
   if (!b) return null;
   const tip = await withDb(async () => (await latestSnapshot())?.height ?? null, async () => (await liveStatus()).height);
   return {
@@ -186,7 +193,7 @@ export async function getBlockDetail(id: string): Promise<BlockDetail | null> {
 
 export async function getTxDetail(txid: string): Promise<TxDetail | null> {
   // cache the compact summary, never the raw tx (large consolidation txs are many MB of JSON)
-  return cached(`txd:${txid}`, 10 * 60_000, async () => { const t = await getRpc().getRawTransaction(txid); return t ? toTxDetail(t) : null; });
+  return cached(`txd:${txid}`, 10 * 60_000, () => lookupGuard(async () => { const t = await getRpc().getRawTransaction(txid); return t ? toTxDetail(t) : null; }));
 }
 function toTxDetail(t: RpcTx): TxDetail {
   return {
@@ -200,7 +207,7 @@ function toTxDetail(t: RpcTx): TxDetail {
 }
 
 export async function getAddressInfo(address: string): Promise<AddressInfo> {
-  const v = await cached(`addr:${address}`, 60_000, () => fetchAddressInfo(address));
+  const v = await cached(`addr:${address}`, 60_000, () => lookupGuard(() => fetchAddressInfo(address)));
   if (!v) throw new Error("address lookup failed");
   return v;
 }

@@ -1,5 +1,6 @@
 import type { RpcBlock, RpcBlockchainInfo, RpcMiningInfo, RpcTx, RpcAddressBalance, RpcAddressDelta } from "./types";
 import * as mock from "./mock";
+import { BudgetExhausted, countCall, totalBudgetOk } from "./rpc-budget";
 
 export class RpcError extends Error {
   constructor(message: string, public code: number | null = null) {
@@ -82,6 +83,8 @@ export class HttpRpcClient implements ZcashRpc {
   }
 
   private async once<T>(url: string, method: string, params: unknown[]): Promise<T> {
+    if (!totalBudgetOk()) throw new BudgetExhausted("total");
+    countCall();
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.user || this.pass) headers.authorization = "Basic " + Buffer.from(`${this.user ?? ""}:${this.pass ?? ""}`).toString("base64");
     const res = await fetch(url, {

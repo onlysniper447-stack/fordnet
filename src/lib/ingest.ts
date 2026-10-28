@@ -6,6 +6,7 @@ import { poolsFrom } from "./pools";
 import type { Degraded, NetworkStatus, RpcBlock, RpcBlockchainInfo } from "./types";
 import { INGEST_INTERVAL_MS, syncState } from "./state";
 import { dbAvailable } from "./dbguard";
+import { flushUsage } from "./rpc-budget";
 export { syncState, LAG_THRESHOLD_SEC } from "./state";
 
 const BLOCKS_PER_DAY = 1152; // 75s target spacing
@@ -114,6 +115,7 @@ async function doIngest(opts: IngestOptions): Promise<IngestResult> {
   await db.delete(schema.blocks).where(lte(schema.blocks.height, tip - KEEP_BLOCKS)); // keep the last 100 only
   await db.delete(schema.statusSnapshots).where(lt(schema.statusSnapshots.takenAt, now - 86400_000));
   await db.delete(schema.rpcCache).where(lt(schema.rpcCache.fetchedAt, now - 86400_000));
+  await db.delete(schema.rateLimits).where(lt(schema.rateLimits.day, utcDate(now / 1000 - 86400))); // yesterday and older
 
   // 3) best effort: backfill daily pool snapshots from real block valuePools, within budget
   const have = new Set((await db.select({ d: schema.poolSnapshots.date }).from(schema.poolSnapshots)).map((r) => r.d));
@@ -207,6 +209,13 @@ export async function ensureFresh(maxAgeMs = INGEST_INTERVAL_MS): Promise<void> 
   if (!dbAvailable()) return; // nowhere to store results
   if (Date.now() < nextCheckAt) return;
   nextCheckAt = Date.now() + 60_000;
+  const flush = () => flushUsage(async (day, n) => { // one cheap upsert per instance per minute
+    const key = `rpcCalls:${day}`;
+    const [r] = await (await getDb()).insert(schema.meta).values({ key, value: String(n) })
+      .onConflictDoUpdate({ target: schema.meta.key, set: { value: sql`(${schema.meta.value}::bigint + ${n})::text` } }).returning({ value: schema.meta.value });
+    return Number(r.value);
+  });
+  try { after(flush); } catch { void flush(); }
   try {
     after(() => ingestIfDue({ maxAgeMs }));
   } catch {

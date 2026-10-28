@@ -16,8 +16,9 @@ const SERIES = [
 type SeriesKey = (typeof SERIES)[number]["key"];
 type View = "stacked" | "per";
 
-const axisFmt = new Intl.NumberFormat("en-US", { notation: "compact", maximumSignificantDigits: 5 });
-const fmtAxis = (v: number) => axisFmt.format(v);
+import { axisFor, fmtAxis } from "@/lib/axis";
+
+const rebuilding = (n: number) => `History rebuilding: ${n} day${n === 1 ? "" : "s"} stored so far. The chart appears once 2+ days are available.`;
 
 function MiniTip({ active, payload, label, name }: TooltipContentProps<number, string> & { name: string }) {
   if (!active || !payload?.length) return null;
@@ -43,18 +44,20 @@ function SmallMultiples({ data, reduced }: { data: PoolPoint[]; reduced: boolean
           <li key={s.key} className="rounded-lg border border-border p-3">
             <p className="flex items-center gap-1.5 text-xs text-muted"><i aria-hidden className="inline-block h-2 w-2 rounded-sm" style={{ background: s.color }} />{s.label}</p>
             <p className="num mt-0.5 text-lg font-semibold">{fmtZecExact(last ?? null).replace(/(\.\d{2})\d+/, "$1")}</p>
-            <p className="num text-xs text-muted">{delta === null ? "change not reported" : `${delta >= 0 ? "+" : ""}${delta.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ZEC over range`}</p>
+            <p className="num text-xs text-muted">{vals.length < 2 ? "change appears after 2 days" : delta === null ? "change not reported" : `${delta >= 0 ? "+" : ""}${delta.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ZEC over range`}</p>
+            {vals.length < 2 ? <p className="mt-2 flex h-24 items-center rounded-md border border-dashed border-border px-3 text-xs text-muted">{rebuilding(vals.length)}</p> : (
             <div className="mt-2 h-24" role="img" aria-label={`${s.label} over the selected range; own y-axis scale.`}>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
                   <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
                   <XAxis dataKey="date" hide />
-                  <YAxis width={48} domain={["auto", "auto"]} tick={{ fontSize: 10, fill: "var(--muted)" }} tickFormatter={fmtAxis} tickCount={3} />
+                  <YAxis width={48} domain={axisFor(vals).domain} ticks={axisFor(vals).ticks} tick={{ fontSize: 10, fill: "var(--muted)" }} tickFormatter={fmtAxis} />
                   <Tooltip content={(p) => <MiniTip {...(p as TooltipContentProps<number, string>)} name={s.label} />} />
                   <Line type="monotone" dataKey={s.key} stroke={s.color} strokeWidth={2} dot={false} isAnimationActive={!reduced} connectNulls={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
+            )}
           </li>
         );
       })}
@@ -122,6 +125,11 @@ export function PoolChart({ points, updatedAt, source }: { points: PoolPoint[]; 
         </div>
       ) : view === "per" ? (
         <SmallMultiples data={data} reduced={reduced} />
+      ) : data.length < 2 ? (
+        <div className="flex h-64 flex-col justify-center gap-2 rounded-lg border border-dashed border-border p-4 text-sm">
+          <p className="text-muted">{rebuilding(data.length)}</p>
+          <ul className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">{shown.map((s) => <li key={s.key} className="flex items-center gap-1.5"><i aria-hidden className="inline-block h-2 w-2 rounded-sm" style={{ background: s.color }} />{s.label}: <span className="num">{fmtZecExact(data[0][s.key]).replace(/(\.\d{2})\d+/, "$1")}</span></li>)}</ul>
+        </div>
       ) : (
         <div className="h-64 w-full" role="img" aria-label={`Pool values over ${range}. Use "View as table" for exact numbers.`}>
           <ResponsiveContainer width="100%" height="100%">
