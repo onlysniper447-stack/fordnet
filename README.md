@@ -11,7 +11,7 @@ Fordnet reports only public protocol data. Shielded amounts and parties are not 
 - **Analytics** `/analytics`: network status and pool history on one page. Pool chart defaults to **Per pool** small multiples (each pool on its own y-axis, with current value and change over range), with a **Stacked** view and an accessible table.
 - **HTTP semantics**: malformed block/tx/address ids return **400** (middleware rewrite to a friendly page); well-formed but unknown ids return **404**.
 - **Homepage** `/`: what Fordnet does, the problems it addresses, a live network strip and a live API response from the same service, architecture, privacy commitment and roadmap (labelled planned). No invented numbers.
-- **Dashboard** `/dashboard`: sync pill (green = last block < 5 min old, amber = lagging, red = node unreachable → last snapshot with timestamp), headline cards (height, hashrate, last block age, txs in last block), recent blocks, pool-value chart (7D/30D/All, exact tooltips, series toggles, "view as table", source + last updated), privacy note, collapsible raw JSON.
+- **Dashboard** `/dashboard`: sync pill (green = last block < 5 min old, amber = lagging, amber/red = provider rate-limited, provider errors or unreachable → stored data with timestamp), headline cards (height, hashrate, last block age, txs in last block), recent blocks, pool-value chart (7D/30D/All, exact tooltips, series toggles, "view as table", source + last updated), privacy note, collapsible raw JSON.
 - **Search**: persistent header search (`/` focuses it on desktop; `/search` autofocuses on mobile). Detects height, 64-hex (tries block then tx, ordered by a leading-zeros hint), t1/t3 addresses; explains shielded/unified addresses and malformed input.
 - **Detail pages**: `/block/[id]`, `/tx/[txid]` (shielded parts shown as counts only), `/address/[taddr]` (transparent balance + recent txs; shielded activity not visible).
 - **Developers** `/developers`: quick start, one-click API key (shown once; only SHA-256 hash stored), endpoint reference, copyable curl.
@@ -45,26 +45,51 @@ Node notes: address pages need zcashd `-insightexplorer` (`getaddressbalance`/`g
 
 ## Architecture
 ```
-            ┌──────────────────────┐   JSON-RPC (5s timeout, 1 retry)
-            │ Zcash node (zcashd / │◄──────────────────────────────┐
-            │ Zebra) — or MockRpc  │                               │
-            └──────────┬───────────┘                               │
-     getblockchaininfo │ getblock(v2) getnetworksolps getmininginfo│
-                       ▼                                           │
- ┌───────────────────────────────┐        ┌────────────────────────┴──────┐
- │ Ingest (src/lib/ingest.ts)    │        │ Service layer (src/lib/       │
- │  • pnpm ingest  (every 60s)   │        │ service.ts) live RPC first,   │
- │  • /api/cron/ingest (Vercel)  │        │ falls back to last snapshot   │
- │  • lazy ensureFresh() on read │        └───────┬──────────────┬────────┘
- └──────────────┬────────────────┘                │              │
-                ▼                                 ▼              ▼
- ┌──────────────────────────────────┐   ┌───────────────┐ ┌──────────────────────┐
- │ Neon Postgres via Drizzle (http) │◄──│ Next.js pages │ │ /api/v1/* route      │
- │ blocks · status_snapshots ·      │   │ (RSC + Suspense│ │ handlers: x-api-key, │
- │ pool_snapshots · api_keys(hash) ·│   │ skeletons)    │ │ 200/day limit, zod,  │
- │ rate_limits · meta               │◄──┴───────────────┘ │ 30s cache, envelope  │
- └──────────────────────────────────┘◄────────────────────┴──────────────────────┘
+ ┌───────────────────────────┐  JSON-RPC: 5s timeout; 503 → one retry after 750ms;
+ │ Zcash node (GetBlock      │  429 → never retried, throws RpcRateLimited
+ │ shared Zebra) — or MockRpc│◄──────────────────────────────────────────────┐
+ └─────────────┬─────────────┘                                               │
+               │ only ingest + cache misses talk to the node                 │
+               ▼                                                             │
+ ┌──────────────────────────────────────┐   ┌────────────────────────────────┴─┐
+ │ Ingest (src/lib/ingest.ts)           │   │ Service (src/lib/service.ts)     │
+ │ triggers: /api/cron/ingest, pnpm     │   │ status: DB snapshot (15s memo),  │
+ │   ingest, after() on page/API reads  │   │   no per-request RPC             │
+ │ 1. skip if lastIngestAt < 60s or in  │   │ details: read-through rpc_cache  │
+ │    provider backoff (rpcHealth)      │   │   tx 10m · block 10m · addr 60s, │
+ │ 2. Postgres lease row (55s, one      │   │   stale copy served on failure   │
+ │    instance at a time)               │   └──────┬──────────────┬────────────┘
+ │ 3. essentials first, then blocks /   │          │              │
+ │    pool backfill within time budget  │          ▼              ▼
+ └──────────────┬───────────────────────┘   ┌─────────────┐ ┌──────────────────┐
+                ▼                           │ Pages: / ,  │ │ /api/v1/*: key,  │
+ ┌──────────────────────────────────────┐   │ /dashboard, │ │ 200/day, zod,    │
+ │ Neon Postgres (Drizzle, neon-http)   │◄──│ /analytics, │ │ 30s cache,       │
+ │ blocks · status_snapshots ·          │   │ details     │ │ {data,meta,error}│
+ │ pool_snapshots · rpc_cache · api_keys│◄──┴─────────────┘ └──────────────────┘
+ │ (hash) · rate_limits · meta (lease,  │
+ │ lastIngestAt, rpcHealth)             │
+ └──────────────────────────────────────┘
 ```
+Routes: `/` is the homepage (what Fordnet is, live strip); the dashboard is at `/dashboard`; `/analytics` holds the pool chart.
+
+### Ingest, lease and backoff
+- Reads never wait for the node: `ensureFresh()` schedules `ingestIfDue()` with Next.js `after()`, so the response is sent first.
+- `ingestIfDue` runs only when `lastIngestAt` is over 60s old and no provider backoff is active. It then takes a single-flight lease (an upsert on the `meta` row `ingestLease`, which succeeds only if the previous lease expired, 55s), so only one instance ingests at a time across all serverless instances.
+- Order: `getblockchaininfo`, `getnetworksolps`, tip block → status snapshot + `lastIngestAt` + today's pool snapshot. Then, best effort within a time budget (20s on request, 50s for `?full=1` cron, 120s for `pnpm ingest`): new blocks (≤30 per run on Vercel) and pool backfill (≤10 days per run). A slow or failed block fetch is skipped, not fatal.
+- Failures are recorded in `meta.rpcHealth` with a reason and a retry time: `rate_limited` (HTTP 429, back off 120s), `provider_error` (HTTP 503, 120s), `unreachable` (timeouts/network, 60s). A success clears it.
+
+### Status freshness and states
+The status shown everywhere comes from the latest DB snapshot. Under 3 minutes old it is current and the state is recomputed (`synced` when the last block is < 5 min old, `lagging` otherwise or when headers are > 2 ahead). Older than 3 minutes it is shown as stale with the precise reason and the data timestamp:
+- `rate_limited` — "Node provider is rate-limiting us — showing stored data" (with the data time and next attempt)
+- `provider_error` — "Node provider is returning errors (HTTP 503) — showing stored data"
+- `unreachable` — only when ingest has actually failed (not because one call was slow).
+
+The API exposes this as `state` plus `degraded: null | { reason, since, retryAt }`.
+
+### GetBlock shared tier notes
+The shared endpoint answers single calls in about 1–4s, but rate-limits bursts (40 parallel calls → 14×200, 20×429, 5×503, 1 timeout) and intermittently returns `503 Service temporarily unavailable` after ~10s. No daily quota exhaustion was observed and it sends no `Retry-After`. Fordnet therefore keeps RPC volume to one serial ingest per minute plus cache misses. Address fetches are sequential (≤10 txs). A second RPC URL as a fallback would add resilience but is not required.
+
 Key files: `src/lib/rpc.ts` (interface + HTTP + mock clients), `src/lib/mock.ts`, `src/lib/ingest.ts`, `src/lib/service.ts`, `src/lib/detect.ts`, `src/lib/ratelimit.ts`, `src/lib/apikeys.ts`, `src/lib/api.ts`, `src/db/schema.ts`, `src/app/**`.
 
 Pool history: each ingest writes today's snapshot from the tip block's `valuePools`, and backfills up to 30 past UTC days (≤10 new days per scheduled run, to respect shared-tier RPC limits) by reading `valuePools` from one block per day (`tip − d × 1152`), so history is real chain data from the node, not interpolated.
@@ -82,7 +107,7 @@ All responses: `{ "data": …, "meta": { mocked, cached, generatedAt, source }, 
 | `GET /api/v1/address/{taddr}` | t1/t3 only |
 | `GET /api/v1/pools/history?range=7d\|30d\|all` | daily ZEC per pool |
 
-Errors: 400 bad input (clear message), 401 missing/invalid key, 404 not found, 429 rate limited, 503 node unreachable.
+Errors: 400 bad input (clear message), 401 missing/invalid key, 404 not found, 429 rate limited, 503 node unreachable and no stored/cached data.
 ```bash
 KEY=$(curl -s -XPOST https://fordnet.vercel.app/api/keys -H 'content-type: application/json' -d '{}' | jq -r .data.key)
 curl -s -H "x-api-key: $KEY" https://fordnet.vercel.app/api/v1/network/status | jq
@@ -92,9 +117,9 @@ curl -s -H "x-api-key: $KEY" "https://fordnet.vercel.app/api/v1/pools/history?ra
 ## Deployment (Vercel)
 Deployed with the Vercel CLI (`engines.node = 24.x`) against a Neon Postgres store attached via the Vercel integration. Blocks, snapshots, API-key hashes and rate-limit counters all live in Postgres, so they are shared by every serverless instance; the daily counter is an atomic `INSERT … ON CONFLICT DO UPDATE SET count = count + 1 RETURNING count`.
 
-Ingest: `vercel.json` registers a daily cron on `/api/cron/ingest` (Hobby allows daily crons only; Vercel sends `Authorization: Bearer $CRON_SECRET`). `GET /api/cron/ingest?full=1` loads the full 100 blocks + 30 pool days. In addition every read calls `ensureFresh()`, which re-ingests when the shared `lastIngestAt` is > 60s old, so the site stays current without an always-on worker. For per-minute guarantees run `pnpm ingest` on an always-on host or use a per-minute cron on Vercel Pro.
+Ingest: `vercel.json` registers a daily cron on `/api/cron/ingest` (Hobby allows daily crons only; Vercel sends `Authorization: Bearer $CRON_SECRET`). `GET /api/cron/ingest?full=1` loads the full 100 blocks + 30 pool days. In addition reads schedule `ensureFresh()` via `after()`, which re-ingests (under the Postgres lease) when the shared `lastIngestAt` is > 60s old, so the site stays current without an always-on worker. For per-minute guarantees run `pnpm ingest` on an always-on host or use a per-minute cron on Vercel Pro.
 
-Status pill: green when the last block is < 5 minutes old (Zcash targets 75s blocks with high variance), amber beyond that or when headers run > 2 ahead, red when the node is unreachable.
+Status pill: green when the last block is < 5 minutes old (Zcash targets 75s blocks with high variance), amber when lagging or when the provider is rate-limited/erroring (stored data shown with its timestamp), red only when ingest has failed as unreachable.
 
 Live data source: a GetBlock shared Zcash mainnet endpoint (Zebra) set as `ZCASH_RPC_URL`. Zebra lacks `getaddressdeltas`, so address pages list recent txids via `getaddresstxids` with per-tx change "not reported"; transparent input addresses/values are also "not reported".
 
