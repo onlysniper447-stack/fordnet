@@ -13,6 +13,7 @@ const DDL = [
   `CREATE TABLE IF NOT EXISTS api_keys (id serial PRIMARY KEY, hash text NOT NULL UNIQUE, prefix text NOT NULL, label text, created_at bigint NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS rate_limits (bucket text NOT NULL, day text NOT NULL, count integer NOT NULL, PRIMARY KEY (bucket, day))`,
   `CREATE TABLE IF NOT EXISTS meta (key text PRIMARY KEY, value text NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS rpc_cache (key text PRIMARY KEY, value text NOT NULL, fetched_at bigint NOT NULL)`,
 ];
 
 const g = globalThis as unknown as { __fordnetDb?: Promise<DB> };

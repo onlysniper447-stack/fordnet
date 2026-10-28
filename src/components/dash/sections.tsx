@@ -32,8 +32,8 @@ export async function StatusSection() {
       </div>
       {!s.live && (
         <div className="mb-4">
-          <Notice tone="error" title={s.snapshotAt ? "Node unreachable — showing last snapshot" : "Node unreachable and no snapshot yet"}>
-            {s.snapshotAt ? <>Data below is from <span className="num">{new Date(s.snapshotAt).toISOString().replace("T", " ").slice(0, 19)} UTC</span>. It will refresh automatically when the node responds.</> : <>Check ZCASH_RPC_URL and credentials, then run <code className="num">pnpm ingest</code>.</>}
+          <Notice tone={s.degraded?.reason === "unreachable" || !s.degraded ? "error" : "warn"} title={s.degraded?.reason === "rate_limited" ? "Node provider is rate-limiting us — showing stored data" : s.degraded?.reason === "provider_error" ? "Node provider is returning errors (HTTP 503) — showing stored data" : s.snapshotAt ? "Node unreachable — showing last snapshot" : "Node unreachable and no snapshot yet"}>
+            {s.snapshotAt ? <>Data below is from <span className="num">{new Date(s.snapshotAt).toISOString().replace("T", " ").slice(0, 19)} UTC</span>.{s.degraded?.retryAt ? <> Next attempt after <span className="num">{new Date(s.degraded.retryAt).toISOString().slice(11, 19)} UTC</span>; the page refreshes on its own.</> : " It refreshes automatically when the node responds."}</> : <>Check ZCASH_RPC_URL, then run <code className="num">pnpm ingest</code>.</>}
           </Notice>
         </div>
       )}

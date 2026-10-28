@@ -7,6 +7,13 @@ export class RpcError extends Error {
   }
 }
 
+/** Provider refused because of rate limits / quota (HTTP 429) or overload (HTTP 503). Never retried immediately. */
+export class RpcRateLimited extends Error {
+  constructor(public status: number, public retryAfterSec: number | null) {
+    super(`RPC provider returned HTTP ${status}`);
+  }
+}
+
 /** Single interface shared by the live and the MOCKED client. */
 export interface ZcashRpc {
   readonly mocked: boolean;
@@ -34,8 +41,10 @@ export class HttpRpcClient implements ZcashRpc {
       try {
         return await this.once<T>(method, params);
       } catch (e) {
-        if (e instanceof RpcError && e.code !== null) throw e; // node answered: don't retry
+        if (e instanceof RpcError && e.code !== null) throw e; // node answered with an RPC error
+        if (e instanceof RpcRateLimited && e.status === 429) throw e; // rate-limited: back off, don't hammer
         lastErr = e;
+        if (attempt === 0 && e instanceof RpcRateLimited) await new Promise((r) => setTimeout(r, 750)); // 503: brief pause, one retry
       }
     }
     throw lastErr instanceof Error ? lastErr : new RpcError(String(lastErr));
@@ -49,6 +58,10 @@ export class HttpRpcClient implements ZcashRpc {
       body: JSON.stringify({ jsonrpc: "1.0", id: "fordnet", method, params }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
+    if (res.status === 429 || res.status === 503) {
+      const ra = Number(res.headers.get("retry-after"));
+      throw new RpcRateLimited(res.status, Number.isFinite(ra) && ra > 0 ? ra : null);
+    }
     const text = await res.text();
     let json: { result?: T; error?: { code: number; message: string } | null };
     try { json = JSON.parse(text); } catch { throw new RpcError(`RPC ${method}: HTTP ${res.status}`); }
@@ -70,12 +83,12 @@ export class HttpRpcClient implements ZcashRpc {
     return b;
   }
   getMiningInfo() { return this.call<RpcMiningInfo>("getmininginfo"); }
-  async getNetworkSolPs() { try { return await this.call<number>("getnetworksolps"); } catch { return null; } }
+  async getNetworkSolPs() { try { return await this.call<number>("getnetworksolps"); } catch (e) { if (e instanceof RpcRateLimited && e.status === 429) throw e; return null; } }
   getRawTransaction(txid: string) { return this.nullOnNotFound(this.call<RpcTx>("getrawtransaction", [txid, 1])); }
   // Address index RPCs need zcashd -insightexplorer / -lightwalletd; null => "not reported".
-  async getAddressBalance(a: string) { try { return await this.call<RpcAddressBalance>("getaddressbalance", [{ addresses: [a] }]); } catch { return null; } }
-  async getAddressTxids(a: string) { try { return await this.call<string[]>("getaddresstxids", [{ addresses: [a] }]); } catch { return null; } }
-  async getAddressDeltas(a: string) { try { return await this.call<RpcAddressDelta[]>("getaddressdeltas", [{ addresses: [a] }]); } catch { return null; } }
+  async getAddressBalance(a: string) { try { return await this.call<RpcAddressBalance>("getaddressbalance", [{ addresses: [a] }]); } catch (e) { if (e instanceof RpcRateLimited) throw e; return null; } }
+  async getAddressTxids(a: string) { try { return await this.call<string[]>("getaddresstxids", [{ addresses: [a] }]); } catch (e) { if (e instanceof RpcRateLimited) throw e; return null; } }
+  async getAddressDeltas(a: string) { try { return await this.call<RpcAddressDelta[]>("getaddressdeltas", [{ addresses: [a] }]); } catch (e) { if (e instanceof RpcRateLimited) throw e; return null; } }
 }
 
 export class MockRpcClient implements ZcashRpc {

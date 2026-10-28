@@ -1,36 +1,49 @@
 import { desc, eq, gte } from "drizzle-orm";
 import { getDb, schema } from "@/db";
 import { getRpc } from "./rpc";
-import { ensureFresh, latestSnapshot, syncState } from "./ingest";
-import { poolsFrom } from "./pools";
+import { ensureFresh, latestSnapshot, rpcHealth, syncState } from "./ingest";
 import type { AddressInfo, BlockDetail, BlockSummary, NetworkStatus, PoolPoint, PoolRange, RpcBlock, RpcTx, TxDetail, TxSummary } from "./types";
 
 const EMPTY_POOLS = { transparent: null, sprout: null, sapling: null, orchard: null, lockbox: null, ironwood: null };
 
+const FRESH_MS = 3 * 60_000; // snapshot older than this (after a refresh attempt) => degraded
+
 let statusCache: { at: number; v: NetworkStatus } | null = null;
+/** Served from the DB snapshot written by ingest; no per-request RPC. */
 export async function getNetworkStatus(): Promise<NetworkStatus> {
   if (statusCache && Date.now() - statusCache.at < 15_000) return statusCache.v;
-  const v = await fetchNetworkStatus();
-  if (v.live) statusCache = { at: Date.now(), v };
+  const v = await buildStatus();
+  statusCache = { at: Date.now(), v };
   return v;
 }
-async function fetchNetworkStatus(): Promise<NetworkStatus> {
-  const rpc = getRpc();
+async function buildStatus(): Promise<NetworkStatus> {
+  await ensureFresh();
+  const [snap, health] = await Promise.all([latestSnapshot(), rpcHealth().catch(() => null)]);
+  if (!snap || snap.snapshotAt === null) {
+    return { state: health?.reason ?? "unreachable", live: false, mocked: getRpc().mocked, chain: null, height: null, headers: null, bestBlockHash: null, hashrateSolPerSec: null, difficulty: null, lastBlockTime: null, lastBlockTxCount: null, verificationProgress: null, pools: EMPTY_POOLS, snapshotAt: null, degraded: health ?? { reason: "unreachable", since: null, retryAt: null } };
+  }
+  if (Date.now() - snap.snapshotAt < FRESH_MS) {
+    return { ...snap, state: syncState(snap.lastBlockTime, snap.height, snap.headers), live: true, degraded: null };
+  }
+  const d = health ?? { reason: "unreachable" as const, since: snap.snapshotAt, retryAt: null };
+  return { ...snap, state: d.reason, live: false, degraded: d };
+}
+
+/** Read-through cache in Postgres so repeat lookups don't hit the RPC provider. Serves stale on failure. */
+async function cached<T>(key: string, ttlMs: number, fetcher: () => Promise<T | null>): Promise<T | null> {
+  const db = await getDb();
+  const [row] = await db.select().from(schema.rpcCache).where(eq(schema.rpcCache.key, key)).limit(1);
+  if (row && Date.now() - row.fetchedAt < ttlMs) return JSON.parse(row.value) as T;
   try {
-    const [info, solps] = await Promise.all([rpc.getBlockchainInfo(), rpc.getNetworkSolPs()]);
-    const tip = await rpc.getBlock(String(info.blocks), 1);
-    void ensureFresh();
-    return {
-      state: syncState(tip?.time ?? null, info.blocks, info.headers ?? null), live: true, mocked: rpc.mocked,
-      chain: info.chain, height: info.blocks, headers: info.headers ?? null, bestBlockHash: info.bestblockhash,
-      hashrateSolPerSec: solps, difficulty: info.difficulty ?? null, lastBlockTime: tip?.time ?? null,
-      lastBlockTxCount: tip?.tx.length ?? null, verificationProgress: info.verificationprogress ?? null,
-      pools: poolsFrom(info.valuePools), snapshotAt: Date.now(),
-    };
-  } catch {
-    const snap = await latestSnapshot();
-    if (snap) return { ...snap, state: "unreachable", live: false };
-    return { state: "unreachable", live: false, mocked: rpc.mocked, chain: null, height: null, headers: null, bestBlockHash: null, hashrateSolPerSec: null, difficulty: null, lastBlockTime: null, lastBlockTxCount: null, verificationProgress: null, pools: EMPTY_POOLS, snapshotAt: null };
+    const v = await fetcher();
+    if (v !== null) {
+      const value = JSON.stringify(v); const fetchedAt = Date.now();
+      await db.insert(schema.rpcCache).values({ key, value, fetchedAt }).onConflictDoUpdate({ target: schema.rpcCache.key, set: { value, fetchedAt } });
+    }
+    return v;
+  } catch (e) {
+    if (row) return JSON.parse(row.value) as T;
+    throw e;
   }
 }
 
@@ -54,18 +67,19 @@ export async function getBlockDetail(id: string): Promise<BlockDetail | null> {
   const db = await getDb();
   const isHeight = /^\d+$/.test(id);
   const [row] = await db.select().from(schema.blocks).where(isHeight ? eq(schema.blocks.height, Number(id)) : eq(schema.blocks.hash, id)).limit(1);
-  let b: RpcBlock | null = row ? (JSON.parse(row.raw) as RpcBlock) : null;
-  try { b = (await getRpc().getBlock(id)) ?? (row ? b : null); } catch { /* use cached row */ }
+  const b: RpcBlock | null = row ? (JSON.parse(row.raw) as RpcBlock) : await cached(`block:${id}`, 10 * 60_000, () => getRpc().getBlock(id));
   if (!b) return null;
+  const tip = (await latestSnapshot())?.height ?? null;
   return {
     height: b.height, hash: b.hash, time: b.time, size: b.size ?? null, txCount: b.tx.length,
-    confirmations: b.confirmations ?? null, previousHash: b.previousblockhash ?? null, nextHash: b.nextblockhash ?? null,
+    confirmations: tip !== null && tip >= b.height ? tip - b.height + 1 : b.confirmations ?? null,
+    previousHash: b.previousblockhash ?? null, nextHash: b.nextblockhash ?? null,
     difficulty: b.difficulty ?? null, txs: b.tx.map(summarizeTx),
   };
 }
 
 export async function getTxDetail(txid: string): Promise<TxDetail | null> {
-  const t = await getRpc().getRawTransaction(txid);
+  const t = await cached(`tx:${txid}`, 10 * 60_000, () => getRpc().getRawTransaction(txid));
   if (!t) return null;
   return {
     txid: t.txid, blockHash: t.blockhash ?? null, height: t.height ?? null, time: t.blocktime ?? t.time ?? null,
@@ -78,6 +92,11 @@ export async function getTxDetail(txid: string): Promise<TxDetail | null> {
 }
 
 export async function getAddressInfo(address: string): Promise<AddressInfo> {
+  const v = await cached(`addr:${address}`, 60_000, () => fetchAddressInfo(address));
+  if (!v) throw new Error("address lookup failed");
+  return v;
+}
+async function fetchAddressInfo(address: string): Promise<AddressInfo> {
   const rpc = getRpc();
   const [bal, deltas] = await Promise.all([rpc.getAddressBalance(address), rpc.getAddressDeltas(address)]);
   let txs: AddressInfo["txs"] = deltas ? [...deltas].sort((a, b) => b.height - a.height).slice(0, 25).map((d) => ({ txid: d.txid, height: d.height, deltaZec: d.satoshis / 1e8 })) : null;
@@ -86,7 +105,8 @@ export async function getAddressInfo(address: string): Promise<AddressInfo> {
     const ids = await rpc.getAddressTxids(address);
     if (ids) {
       const recent = ids.slice(-10).reverse();
-      const raws = await Promise.all(recent.map((id) => rpc.getRawTransaction(id).catch(() => null)));
+      const raws: (RpcTx | null)[] = [];
+      for (const id of recent) raws.push(await cached(`tx:${id}`, 10 * 60_000, () => rpc.getRawTransaction(id)).catch(() => null)); // sequential: gentle on the provider
       txs = recent.map((txid, i) => ({ txid, height: raws[i]?.height ?? null, deltaZec: null }));
       txs.sort((a, b) => (b.height ?? 0) - (a.height ?? 0));
     }

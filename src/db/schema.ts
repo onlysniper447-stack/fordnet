@@ -41,4 +41,10 @@ export const rateLimits = pgTable("rate_limits", {
   count: integer("count").notNull(),
 }, (t) => [primaryKey({ columns: [t.bucket, t.day] })]);
 
+export const rpcCache = pgTable("rpc_cache", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  fetchedAt: bigint("fetched_at", { mode: "number" }).notNull(),
+});
+
 export const meta = pgTable("meta", { key: text("key").primaryKey(), value: text("value").notNull() });

@@ -4,6 +4,8 @@ import type { SyncState } from "@/lib/types";
 const MAP: Record<SyncState, { label: string; dot: string; text: string }> = {
   synced: { label: "Synced", dot: "bg-accent", text: "text-accent-text" },
   lagging: { label: "Lagging", dot: "bg-warn", text: "text-warn" },
+  provider_error: { label: "Provider errors", dot: "bg-warn", text: "text-warn" },
+  rate_limited: { label: "Provider rate-limited", dot: "bg-warn", text: "text-warn" },
   unreachable: { label: "Node unreachable", dot: "bg-danger", text: "text-danger" },
 };
 export function StatusPill({ state }: { state: SyncState }) {

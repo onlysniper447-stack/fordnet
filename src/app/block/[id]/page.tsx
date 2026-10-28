@@ -20,7 +20,7 @@ export default async function BlockPage({ params }: { params: Promise<{ id: stri
       <PageTitle eyebrow="Block" title={<span className="num">#{b.height.toLocaleString()}</span>}>
         <nav aria-label="Adjacent blocks" className="mt-2 flex gap-3 text-sm">
           {b.previousHash && <Link className="text-accent-text hover:underline" href={`/block/${b.height - 1}`}>← {fmtInt(b.height - 1)}</Link>}
-          {b.nextHash && <Link className="text-accent-text hover:underline" href={`/block/${b.height + 1}`}>{fmtInt(b.height + 1)} →</Link>}
+          {(b.nextHash || (b.confirmations ?? 0) > 1) && <Link className="text-accent-text hover:underline" href={`/block/${b.height + 1}`}>{fmtInt(b.height + 1)} →</Link>}
         </nav>
       </PageTitle>
       <Card>

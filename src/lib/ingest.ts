@@ -1,8 +1,9 @@
-import { desc, eq, gt, lt, lte } from "drizzle-orm";
+import { desc, eq, gt, inArray, lt, lte, sql } from "drizzle-orm";
+import { after } from "next/server";
 import { getDb, schema } from "@/db";
-import { getRpc } from "./rpc";
+import { getRpc, RpcRateLimited } from "./rpc";
 import { poolsFrom } from "./pools";
-import type { NetworkStatus, RpcBlock, SyncState } from "./types";
+import type { Degraded, NetworkStatus, RpcBlock, SyncState } from "./types";
 
 export const LAG_THRESHOLD_SEC = 300; // 5 min: Zcash targets 75s blocks with high variance
 const BLOCKS_PER_DAY = 1152; // 75s target spacing
@@ -19,10 +20,10 @@ export function syncState(lastBlockTime: number | null, height: number | null, h
   return "lagging";
 }
 
-export interface IngestResult { height: number; newBlocks: number; poolDaysWritten: number; mocked: boolean; }
+export interface IngestResult { height: number; newBlocks: number; poolDaysWritten: number; blockErrors: number; mocked: boolean; }
 
 let running: Promise<IngestResult> | null = null;
-export interface IngestOptions { maxNewBlocks?: number; maxBackfillPerRun?: number }
+export interface IngestOptions { maxNewBlocks?: number; maxBackfillPerRun?: number; budgetMs?: number }
 export function runIngest(opts: IngestOptions = {}): Promise<IngestResult> {
   running ??= doIngest(opts).finally(() => { running = null; });
   return running;
@@ -44,57 +45,67 @@ async function storePoolDay(b: RpcBlock, takenAt: number) {
 async function doIngest(opts: IngestOptions): Promise<IngestResult> {
   const maxNew = opts.maxNewBlocks ?? MAX_NEW_BLOCKS_PER_RUN;
   const maxBackfill = opts.maxBackfillPerRun ?? MAX_BACKFILL_PER_RUN;
+  const budgetMs = opts.budgetMs ?? 20_000; // stop optional work early; the provider can be slow
   const rpc = getRpc();
   const db = await getDb();
   const now = Date.now();
-  const [info, mining, solps] = await Promise.all([rpc.getBlockchainInfo(), rpc.getMiningInfo().catch(() => null), rpc.getNetworkSolPs()]);
+  const overBudget = () => Date.now() - now > budgetMs;
+
+  // 1) essentials first: chain info, tip block, status snapshot. Freshness recovers even if the rest is slow.
+  const info = await rpc.getBlockchainInfo();
   const tip = info.blocks;
-
-  // 1) last 100 blocks first, newest first; skip heights already stored (re-check a 10-block reorg window)
-  const stored = new Map((await db.select({ h: schema.blocks.height, hash: schema.blocks.hash }).from(schema.blocks)
-    .where(gt(schema.blocks.height, tip - KEEP_BLOCKS))).map((r) => [r.h, r.hash]));
+  const solps = await rpc.getNetworkSolPs();
+  const mining = solps === null ? await rpc.getMiningInfo().catch(() => null) : null;
+  const [tipRow] = await db.select().from(schema.blocks).where(eq(schema.blocks.height, tip)).limit(1);
+  let tipBlock: RpcBlock | null = tipRow && tipRow.hash === info.bestblockhash ? (JSON.parse(tipRow.raw) as RpcBlock) : null;
   let newBlocks = 0;
-  let tipBlock: RpcBlock | null = null;
-  for (let h = tip; h > tip - KEEP_BLOCKS && h >= 0; h--) {
-    const existing = stored.get(h);
-    if (existing && h < tip - 10) continue;
-    const b = await rpc.getBlock(String(h));
-    if (!b) continue;
-    if (h === tip) tipBlock = b;
-    if (existing !== b.hash) { await storeBlock(b); newBlocks++; }
-    if (newBlocks >= maxNew) break; // remaining history fills on later runs
+  if (!tipBlock) {
+    tipBlock = await rpc.getBlock(String(tip)).catch((e: unknown) => { if (e instanceof RpcRateLimited && e.status === 429) throw e; return null; });
+    if (tipBlock) { await storeBlock(tipBlock); newBlocks++; }
   }
-  await db.delete(schema.blocks).where(lte(schema.blocks.height, tip - KEEP_BLOCKS * 5));
-  tipBlock ??= await rpc.getBlock(String(tip));
-
-  // 2) status snapshot
   const status: NetworkStatus = {
     state: syncState(tipBlock?.time ?? null, tip, info.headers ?? null, now),
     live: true, mocked: rpc.mocked, chain: info.chain, height: tip, headers: info.headers ?? null,
     bestBlockHash: info.bestblockhash, hashrateSolPerSec: solps ?? mining?.networksolps ?? null,
     difficulty: info.difficulty ?? mining?.difficulty ?? null, lastBlockTime: tipBlock?.time ?? null,
     lastBlockTxCount: tipBlock?.tx.length ?? null, verificationProgress: info.verificationprogress ?? null,
-    pools: poolsFrom(info.valuePools), snapshotAt: now,
+    pools: poolsFrom(info.valuePools), snapshotAt: now, degraded: null,
   };
   await db.insert(schema.statusSnapshots).values({ takenAt: now, json: JSON.stringify(status) });
-  await db.delete(schema.statusSnapshots).where(lt(schema.statusSnapshots.takenAt, now - 7 * 86400_000));
-
-  // 3) daily pool snapshots: today from the tip block, then backfill past days from real block valuePools
-  let poolDaysWritten = 0;
-  if (tipBlock) { await storePoolDay(tipBlock, now); poolDaysWritten++; }
-  const have = new Set((await db.select({ d: schema.poolSnapshots.date }).from(schema.poolSnapshots)).map((r) => r.d));
-  for (let d = 1; d <= BACKFILL_DAYS; d++) {
-    const h = tip - d * BLOCKS_PER_DAY;
-    if (h < 0 || poolDaysWritten > maxBackfill) break;
-    const approxDate = utcDate(now / 1000 - d * 86400);
-    if (have.has(approxDate)) continue;
-    const b = await rpc.getBlock(String(h), 1).catch(() => null);
-    if (!b || have.has(utcDate(b.time))) continue;
-    await storePoolDay(b, now); have.add(utcDate(b.time)); poolDaysWritten++;
-  }
   await db.insert(schema.meta).values({ key: "lastIngestAt", value: String(now) })
     .onConflictDoUpdate({ target: schema.meta.key, set: { value: String(now) } });
-  return { height: tip, newBlocks, poolDaysWritten, mocked: rpc.mocked };
+  let poolDaysWritten = 0;
+  if (tipBlock) { await storePoolDay(tipBlock, now); poolDaysWritten++; }
+
+  // 2) best effort: fill the last 100 blocks newest-first (re-check a 10-block reorg window), within budget
+  const stored = new Map((await db.select({ h: schema.blocks.height, hash: schema.blocks.hash }).from(schema.blocks)
+    .where(gt(schema.blocks.height, tip - KEEP_BLOCKS))).map((r) => [r.h, r.hash]));
+  let blockErrors = 0;
+  for (let h = tip - 1; h > tip - KEEP_BLOCKS && h >= 0 && !overBudget(); h--) {
+    const existing = stored.get(h);
+    if (existing && h < tip - 10) continue;
+    let b: RpcBlock | null;
+    try { b = await rpc.getBlock(String(h)); }
+    catch (e) { if (e instanceof RpcRateLimited && e.status === 429) throw e; blockErrors++; break; }
+    if (!b) continue;
+    if (existing !== b.hash) { await storeBlock(b); newBlocks++; }
+    if (newBlocks >= maxNew) break; // remaining history fills on later runs
+  }
+  await db.delete(schema.blocks).where(lte(schema.blocks.height, tip - KEEP_BLOCKS * 5));
+  await db.delete(schema.statusSnapshots).where(lt(schema.statusSnapshots.takenAt, now - 7 * 86400_000));
+
+  // 3) best effort: backfill daily pool snapshots from real block valuePools, within budget
+  const have = new Set((await db.select({ d: schema.poolSnapshots.date }).from(schema.poolSnapshots)).map((r) => r.d));
+  for (let d = 1; d <= BACKFILL_DAYS && !overBudget(); d++) {
+    const h = tip - d * BLOCKS_PER_DAY;
+    if (h < 0 || poolDaysWritten > maxBackfill) break;
+    if (have.has(utcDate(now / 1000 - d * 86400))) continue;
+    const b = await rpc.getBlock(String(h), 1).catch(() => null);
+    if (!b) break;
+    if (have.has(utcDate(b.time))) continue;
+    await storePoolDay(b, now); have.add(utcDate(b.time)); poolDaysWritten++;
+  }
+  return { height: tip, newBlocks, poolDaysWritten, blockErrors, mocked: rpc.mocked };
 }
 
 export async function lastIngestAt(): Promise<number | null> {
@@ -102,11 +113,74 @@ export async function lastIngestAt(): Promise<number | null> {
   return r ? Number(r.value) : null;
 }
 
-/** On serverless (no always-on worker) refresh lazily if data is older than maxAgeMs. */
+const LEASE_MS = 55_000;
+const RATE_LIMIT_BACKOFF_MS = 120_000;
+const UNREACHABLE_BACKOFF_MS = 60_000;
+
+async function setMeta(key: string, value: string) {
+  const db = await getDb();
+  await db.insert(schema.meta).values({ key, value }).onConflictDoUpdate({ target: schema.meta.key, set: { value } });
+}
+
+/** Atomic cross-instance lease: only one serverless instance ingests per window. */
+async function acquireLease(now: number): Promise<boolean> {
+  const db = await getDb();
+  const until = String(now + LEASE_MS);
+  const rows = await db.insert(schema.meta).values({ key: "ingestLease", value: until })
+    .onConflictDoUpdate({ target: schema.meta.key, set: { value: until }, setWhere: sql`${schema.meta.value}::bigint < ${now}` })
+    .returning({ key: schema.meta.key });
+  return rows.length > 0;
+}
+
+/** Last provider failure, persisted so every instance backs off and the UI can explain it. */
+export async function rpcHealth(): Promise<Degraded | null> {
+  const db = await getDb();
+  const [r] = await db.select().from(schema.meta).where(eq(schema.meta.key, "rpcHealth")).limit(1);
+  if (!r || !r.value) return null;
+  return JSON.parse(r.value) as Degraded;
+}
+
+async function recordFailure(e: unknown, now: number) {
+  const prev = await rpcHealth().catch(() => null);
+  const limited = e instanceof RpcRateLimited && e.status === 429;
+  const providerErr = e instanceof RpcRateLimited && e.status !== 429;
+  const ra = e instanceof RpcRateLimited ? e.retryAfterSec : null;
+  const wait = ra ? ra * 1000 : limited ? RATE_LIMIT_BACKOFF_MS : UNREACHABLE_BACKOFF_MS;
+  const detail = (e instanceof Error ? e.message : String(e)).replace(/https?:\/\/\S+/g, "[url]").slice(0, 300);
+  const d: Degraded = { reason: limited ? "rate_limited" : providerErr ? "provider_error" : "unreachable", since: prev?.since ?? now, retryAt: now + wait, detail };
+  await setMeta("rpcHealth", JSON.stringify(d));
+  console.warn(`[ingest] ${d.reason}: ${e instanceof Error ? e.message : String(e)}; next attempt ${new Date(d.retryAt ?? now).toISOString()}`);
+}
+
+/** Lease + backoff aware ingest. Used by page/API reads, the cron route and the worker. */
+export async function ingestIfDue(opts: IngestOptions & { maxAgeMs?: number; force?: boolean } = {}): Promise<IngestResult | null> {
+  const now = Date.now();
+  try {
+    const db = await getDb();
+    const rows = await db.select().from(schema.meta).where(inArray(schema.meta.key, ["lastIngestAt", "rpcHealth"]));
+    const m = new Map(rows.map((r) => [r.key, r.value]));
+    const last = Number(m.get("lastIngestAt") ?? 0);
+    if (!opts.force && now - last < (opts.maxAgeMs ?? 60_000)) return null;
+    const health = m.get("rpcHealth") ? (JSON.parse(m.get("rpcHealth") as string) as Degraded) : null;
+    if (health?.retryAt && now < health.retryAt) return null; // provider told us to back off
+    if (!(await acquireLease(now))) return null; // another instance is ingesting
+    const r = await runIngest(opts);
+    if (health) await setMeta("rpcHealth", "");
+    return r;
+  } catch (e) {
+    await recordFailure(e, now).catch(() => undefined);
+    if (opts.force) throw e;
+    return null;
+  }
+}
+
+/** Never blocks a page/API response on the provider: refresh runs after the response is sent. */
 export async function ensureFresh(maxAgeMs = 60_000): Promise<void> {
-  const last = await lastIngestAt();
-  if (last !== null && Date.now() - last < maxAgeMs) return;
-  try { await runIngest(); } catch { /* node down: callers fall back to snapshots */ }
+  try {
+    after(() => ingestIfDue({ maxAgeMs }));
+  } catch {
+    await ingestIfDue({ maxAgeMs }); // outside a request (worker/script)
+  }
 }
 
 export async function latestSnapshot(): Promise<NetworkStatus | null> {
