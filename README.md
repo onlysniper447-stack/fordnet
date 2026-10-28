@@ -1,12 +1,14 @@
 # Fordnet — Zcash network intelligence + public REST API
 
-ZECATHON · Core & Tooling track. Live: **https://fordnet.vercel.app**
+ZECATHON · Core & Tooling track. Live: **https://fordnet.vercel.app** · Source: **https://github.com/onlysniper447-stack/fordnet**
 
 > ℹ️ **Live mainnet data** via `ZCASH_RPC_URL`. Without it, Fordnet falls back to MOCKED mode: No Zcash node was reachable when this was built (no credentials were provided and no public, keyless Zcash JSON-RPC endpoint responded). Fordnet then uses a deterministic `MockRpcClient` that implements the same `ZcashRpc` interface as the live client. The UI shows a **MOCKED DATA** banner and every API response sets `meta.mocked: true`. Set `ZCASH_RPC_URL` (+ user/pass) and the same code serves real chain data.
 
 Fordnet reports only public protocol data. Shielded amounts and parties are not inferred.
 
 ## Features
+- **Navigation**: top-left menu (accessible slide-in drawer: focus trap, Esc to close, focus return, active route) grouping Tools, Analytics, API and Products.
+- **Analytics** `/analytics`: network status and pool history on one page.
 - **Dashboard** `/`: sync pill (green = last block < 5 min old, amber = lagging, red = node unreachable → last snapshot with timestamp), headline cards (height, hashrate, last block age, txs in last block), recent blocks, pool-value chart (7D/30D/All, exact tooltips, series toggles, "view as table", source + last updated), privacy note, collapsible raw JSON.
 - **Search**: persistent header search (`/` focuses it on desktop; `/search` autofocuses on mobile). Detects height, 64-hex (tries block then tx, ordered by a leading-zeros hint), t1/t3 addresses; explains shielded/unified addresses and malformed input.
 - **Detail pages**: `/block/[id]`, `/tx/[txid]` (shielded parts shown as counts only), `/address/[taddr]` (transparent balance + recent txs; shielded activity not visible).

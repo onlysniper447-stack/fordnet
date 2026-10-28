@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { Moon, Search, Sun } from "lucide-react";
+import { NavDrawer } from "./nav-drawer";
 
 export function SearchBox({ autoFocusMobile = false, initial = "", id = "header-search" }: { autoFocusMobile?: boolean; initial?: string; id?: string }) {
   const router = useRouter();
@@ -52,6 +53,7 @@ export function Header() {
     <header className="sticky top-0 z-20 border-b border-border bg-bg/90 backdrop-blur">
       <a href="#main" className="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:rounded focus:bg-accent focus:px-3 focus:py-2 focus:text-accent-fg">Skip to content</a>
       <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 md:flex-nowrap">
+        <NavDrawer />
         <Link href="/" className="flex items-center gap-2 font-semibold">
           <span aria-hidden className="inline-block h-3 w-3 rounded-sm bg-accent" />Fordnet
         </Link>
