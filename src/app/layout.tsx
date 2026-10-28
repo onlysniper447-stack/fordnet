@@ -32,7 +32,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         )}
         <Header />
         <main id="main" className="mx-auto w-full max-w-6xl px-4 py-6">{children}</main>
-        <footer className="mx-auto flex max-w-6xl flex-wrap gap-x-4 gap-y-1 px-4 pb-8 text-xs text-muted"><span>{mocked ? "Data: MOCKED RPC" : "Data: Zcash mainnet node via JSON-RPC"}</span><a className="hover:text-fg" href="/developers">API docs</a><a className="hover:text-fg" href="https://github.com/onlysniper447-stack/fordnet">Source on GitHub</a></footer>
+        <footer className="mx-auto flex max-w-6xl flex-wrap gap-x-4 gap-y-1 px-4 pb-8 text-xs text-muted"><span>{mocked ? "Data: MOCKED RPC" : "Data: Zcash mainnet node via JSON-RPC"}</span><a className="hover:text-fg" href="/developers">API docs</a><a className="hover:text-fg" href="https://github.com/onlysniper447-stack/fordnet">Source on GitHub</a><span className="sm:ml-auto">Built for <span className="text-fg">ZECATHON 2026</span></span></footer>
         <Toaster theme="system" position="bottom-center" richColors />
       </body>
     </html>

@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, like, or, sql } from "drizzle-orm";
 import { getDb, schema } from "@/db";
 import type { CounterStore } from "./ratelimit";
 
@@ -22,6 +22,9 @@ export async function verifyApiKey(key: string): Promise<string | null> {
   const h = hashKey(key);
   const [r] = await (await getDb()).select({ hash: schema.apiKeys.hash }).from(schema.apiKeys).where(eq(schema.apiKeys.hash, h)).limit(1);
   if (r) return r.hash;
+  // A deleted key would otherwise re-register via its valid HMAC tag, so revocations are remembered by hash.
+  const [rev] = await (await getDb()).select({ hash: schema.revokedKeys.hash }).from(schema.revokedKeys).where(eq(schema.revokedKeys.hash, h)).limit(1);
+  if (rev) return null;
   const m = /^fn_([A-Za-z0-9_-]{24})\.([A-Za-z0-9_-]{16})$/.exec(key);
   if (!m) return null;
   const a = Buffer.from(tag(m[1])); const b = Buffer.from(m[2]);
@@ -37,4 +40,19 @@ export class DbCounterStore implements CounterStore {
       .returning({ count: schema.rateLimits.count });
     return r.count;
   }
+}
+
+/** Delete keys (and their rate-limit rows) and remember their hashes so they cannot re-register. */
+export async function revokeKeys(opts: { keys?: string[]; labels?: string[]; prefixes?: string[] }): Promise<number> {
+  const db = await getDb();
+  const hashes = (opts.keys ?? []).map(hashKey);
+  const conds = [...(hashes.length ? [inArray(schema.apiKeys.hash, hashes)] : []), ...(opts.labels?.length ? [inArray(schema.apiKeys.label, opts.labels)] : []), ...(opts.prefixes?.length ? [inArray(schema.apiKeys.prefix, opts.prefixes)] : [])];
+  const rows = conds.length ? await db.select({ hash: schema.apiKeys.hash }).from(schema.apiKeys).where(or(...conds)) : [];
+  const all = [...new Set([...hashes, ...rows.map((r) => r.hash)])];
+  if (!all.length) return 0;
+  const now = Date.now();
+  await db.insert(schema.revokedKeys).values(all.map((hash) => ({ hash, revokedAt: now }))).onConflictDoNothing();
+  await db.delete(schema.apiKeys).where(inArray(schema.apiKeys.hash, all));
+  for (const h of all) await db.delete(schema.rateLimits).where(like(schema.rateLimits.bucket, `key:${h}`));
+  return all.length;
 }

@@ -41,6 +41,11 @@ export const rateLimits = pgTable("rate_limits", {
   count: integer("count").notNull(),
 }, (t) => [primaryKey({ columns: [t.bucket, t.day] })]);
 
+export const revokedKeys = pgTable("revoked_keys", {
+  hash: text("hash").primaryKey(),
+  revokedAt: bigint("revoked_at", { mode: "number" }).notNull(),
+});
+
 export const rpcCache = pgTable("rpc_cache", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),

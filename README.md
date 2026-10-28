@@ -95,7 +95,7 @@ Key files: `src/lib/rpc.ts` (interface + HTTP + mock clients), `src/lib/mock.ts`
 Pool history: each ingest writes today's snapshot from the tip block's `valuePools`, and backfills up to 30 past UTC days (≤10 new days per scheduled run, to respect shared-tier RPC limits) by reading `valuePools` from one block per day (`tip − d × 1152`), so history is real chain data from the node, not interpolated.
 
 ## API v1
-All responses: `{ "data": …, "meta": { mocked, cached, generatedAt, source }, "error": null | { code, message } }`. Header `x-api-key` required. 200 requests/UTC day per key → `429` + `Retry-After`; `X-RateLimit-*` headers; `Cache-Control: private, max-age=30` + 30s server cache.
+All responses: `{ "data": …, "meta": { mocked, cached, generatedAt, source }, "error": null | { code, message } }`. Header `x-api-key` required. 200 requests/UTC day per key → `429` + `Retry-After`; `X-RateLimit-*` headers; `Cache-Control: private, max-age=30` + 30s server cache on success; every error response (400/401/404/429/503) is `no-store`.
 
 | Method & path | Notes |
 |---|---|
@@ -113,6 +113,8 @@ KEY=$(curl -s -XPOST https://fordnet.vercel.app/api/keys -H 'content-type: appli
 curl -s -H "x-api-key: $KEY" https://fordnet.vercel.app/api/v1/network/status | jq
 curl -s -H "x-api-key: $KEY" "https://fordnet.vercel.app/api/v1/pools/history?range=7d" | jq
 ```
+
+Key revocation (operator only): `POST /api/admin/revoke-keys` with `Authorization: Bearer $CRON_SECRET` and `{"keys"?, "labels"?, "prefixes"?}` deletes the keys and their rate-limit rows and records the hashes in `revoked_keys`, so an HMAC-valid key cannot silently re-register.
 
 ## Deployment (Vercel)
 Deployed with the Vercel CLI (`engines.node = 24.x`) against a Neon Postgres store attached via the Vercel integration. Blocks, snapshots, API-key hashes and rate-limit counters all live in Postgres, so they are shared by every serverless instance; the daily counter is an atomic `INSERT … ON CONFLICT DO UPDATE SET count = count + 1 RETURNING count`.

@@ -16,7 +16,7 @@ function rlHeaders(rl: RateLimitResult): Record<string, string> {
 
 export function apiError(status: number, code: string, message: string, headers: Record<string, string> = {}) {
   const body: ApiEnvelope<null> = { data: null, meta: { mocked: isMocked() }, error: { code, message } };
-  return NextResponse.json(body, { status, headers });
+  return NextResponse.json(body, { status, headers: { ...headers, "Cache-Control": "no-store" } }); // errors are never cached
 }
 
 export class BadRequest extends Error {}

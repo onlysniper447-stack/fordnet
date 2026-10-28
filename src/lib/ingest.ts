@@ -179,7 +179,10 @@ export async function ensureFresh(maxAgeMs = 60_000): Promise<void> {
   try {
     after(() => ingestIfDue({ maxAgeMs }));
   } catch {
-    await ingestIfDue({ maxAgeMs }); // outside a request (worker/script)
+    // Outside a request scope. In the Next.js server never block a render on the node:
+    // fire and forget. Only standalone scripts (no NEXT_RUNTIME) wait for the ingest.
+    if (process.env.NEXT_RUNTIME) void ingestIfDue({ maxAgeMs }).catch(() => undefined);
+    else await ingestIfDue({ maxAgeMs });
   }
 }
 

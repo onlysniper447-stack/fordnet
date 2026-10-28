@@ -1,4 +1,5 @@
 import { desc, eq, gte } from "drizzle-orm";
+import { after } from "next/server";
 import { getDb, schema } from "@/db";
 import { getRpc } from "./rpc";
 import { ensureFresh, latestSnapshot, rpcHealth, syncState } from "./ingest";
@@ -33,19 +34,26 @@ async function buildStatus(): Promise<NetworkStatus> {
 async function cached<T>(key: string, ttlMs: number, fetcher: () => Promise<T | null>): Promise<T | null> {
   const db = await getDb();
   const [row] = await db.select().from(schema.rpcCache).where(eq(schema.rpcCache.key, key)).limit(1);
-  if (row && Date.now() - row.fetchedAt < ttlMs) return JSON.parse(row.value) as T;
-  try {
+  const refresh = async (): Promise<T | null> => {
     const v = await fetcher();
     if (v !== null) {
       const value = JSON.stringify(v); const fetchedAt = Date.now();
       await db.insert(schema.rpcCache).values({ key, value, fetchedAt }).onConflictDoUpdate({ target: schema.rpcCache.key, set: { value, fetchedAt } });
     }
     return v;
-  } catch (e) {
-    if (row) return JSON.parse(row.value) as T;
-    throw e;
+  };
+  if (row) {
+    // Stale-while-revalidate: never make a reader wait on the node when we hold a copy.
+    if (Date.now() - row.fetchedAt >= ttlMs && !refreshing.has(key)) {
+      refreshing.add(key);
+      const job = () => refresh().catch(() => null).finally(() => refreshing.delete(key));
+      try { after(job); } catch { void job(); }
+    }
+    return JSON.parse(row.value) as T;
   }
+  return refresh();
 }
+const refreshing = new Set<string>();
 
 export async function getRecentBlocks(limit: number): Promise<BlockSummary[]> {
   await ensureFresh();
