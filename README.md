@@ -10,7 +10,8 @@ Fordnet reports only public protocol data. Shielded amounts and parties are not 
 - **Navigation**: top-left menu (accessible slide-in drawer: focus trap, Esc to close, focus return, active route) grouping Tools, Analytics, API and Products.
 - **Analytics** `/analytics`: network status and pool history on one page. Pool chart defaults to **Per pool** small multiples (each pool on its own y-axis, with current value and change over range), with a **Stacked** view and an accessible table.
 - **HTTP semantics**: malformed block/tx/address ids return **400** (middleware rewrite to a friendly page); well-formed but unknown ids return **404**.
-- **Dashboard** `/`: sync pill (green = last block < 5 min old, amber = lagging, red = node unreachable → last snapshot with timestamp), headline cards (height, hashrate, last block age, txs in last block), recent blocks, pool-value chart (7D/30D/All, exact tooltips, series toggles, "view as table", source + last updated), privacy note, collapsible raw JSON.
+- **Homepage** `/`: what Fordnet does, the problems it addresses, a live network strip and a live API response from the same service, architecture, privacy commitment and roadmap (labelled planned). No invented numbers.
+- **Dashboard** `/dashboard`: sync pill (green = last block < 5 min old, amber = lagging, red = node unreachable → last snapshot with timestamp), headline cards (height, hashrate, last block age, txs in last block), recent blocks, pool-value chart (7D/30D/All, exact tooltips, series toggles, "view as table", source + last updated), privacy note, collapsible raw JSON.
 - **Search**: persistent header search (`/` focuses it on desktop; `/search` autofocuses on mobile). Detects height, 64-hex (tries block then tx, ordered by a leading-zeros hint), t1/t3 addresses; explains shielded/unified addresses and malformed input.
 - **Detail pages**: `/block/[id]`, `/tx/[txid]` (shielded parts shown as counts only), `/address/[taddr]` (transparent balance + recent txs; shielded activity not visible).
 - **Developers** `/developers`: quick start, one-click API key (shown once; only SHA-256 hash stored), endpoint reference, copyable curl.
@@ -98,7 +99,7 @@ Status pill: green when the last block is < 5 minutes old (Zcash targets 75s blo
 Live data source: a GetBlock shared Zcash mainnet endpoint (Zebra) set as `ZCASH_RPC_URL`. Zebra lacks `getaddressdeltas`, so address pages list recent txids via `getaddresstxids` with per-tx change "not reported"; transparent input addresses/values are also "not reported".
 
 ## 2-minute demo script
-1. **(0:00)** Open https://fordnet.vercel.app on a phone-width window. Point out the MOCKED banner (honesty), the green **Synced** pill, the four headline cards, and the privacy note.
+1. **(0:00)** Open https://fordnet.vercel.app on a phone-width window. The homepage states the problem in four lines and shows a live strip (height, hashrate, last block, Orchard pool) with source and timestamp. Tap **Open dashboard**: the green **Synced** pill, four headline cards and the privacy note.
 2. **(0:20)** Expand "Raw network status" to show the exact JSON behind the cards. Note "not reported" is used whenever a node omits a field.
 3. **(0:35)** Pool chart: switch 7D → 30D → All, hover for exact 8-decimal values, toggle Transparent on, click **View as table**. Show "Source / Last updated" caption.
 4. **(0:55)** Press `/` (desktop), paste a block height → block page; copy the hash (toast). Click a txid → tx page: transparent ins/outs plus *counts* of Sapling/Orchard components, "amounts private".

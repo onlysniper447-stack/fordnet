@@ -58,6 +58,7 @@ export function Header() {
           <span aria-hidden className="inline-block h-3 w-3 rounded-sm bg-accent" />Fordnet
         </Link>
         <nav aria-label="Primary" className="ml-auto flex items-center gap-1 text-sm md:order-3 md:ml-0">
+          <Link href="/dashboard" className="hidden rounded-md px-2 py-2 text-muted hover:text-fg sm:inline">Dashboard</Link>
           <Link href="/developers" className="rounded-md px-2 py-2 text-muted hover:text-fg">API</Link>
           <ThemeToggle />
         </nav>

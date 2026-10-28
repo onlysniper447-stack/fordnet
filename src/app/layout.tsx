@@ -8,7 +8,13 @@ import "./globals.css";
 const sans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const mono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
-export const metadata: Metadata = { title: { default: "Fordnet — Zcash network intelligence", template: "%s · Fordnet" }, description: "Live Zcash network status, blocks, transparent lookups, pool history and a public REST API." };
+export const metadata: Metadata = {
+  metadataBase: new URL(process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : "http://localhost:3000"),
+  title: { default: "Fordnet — Zcash network data and a public REST API", template: "%s · Fordnet" },
+  description: "Live Zcash block, transaction, transparent-address and value-pool data from a node, served as a dashboard and a versioned REST API. Public protocol data only; shielded activity is never inferred.",
+  openGraph: { type: "website", siteName: "Fordnet", title: "Fordnet — Zcash network data you can query in one request", description: "Dashboard and REST API for public Zcash protocol data." },
+  twitter: { card: "summary_large_image" },
+};
 export const viewport: Viewport = { width: "device-width", initialScale: 1, themeColor: "#0a0f0d" };
 
 const themeScript = `try{if(localStorage.getItem('theme')==='light')document.documentElement.classList.remove('dark')}catch(e){}`;

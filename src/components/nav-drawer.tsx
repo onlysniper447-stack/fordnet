@@ -21,7 +21,8 @@ const SECTIONS: { title: string; items: NavItem[] }[] = [
     { href: "/developers#ref", label: "Endpoint reference", hint: "Six read-only v1 endpoints" },
   ] },
   { title: "Products", items: [
-    { href: "/", label: "Explorer dashboard", hint: "Live status, recent blocks, pool chart" },
+    { href: "/", label: "Overview", hint: "What Fordnet does and how it works" },
+    { href: "/dashboard", label: "Explorer dashboard", hint: "Live status, recent blocks, pool chart" },
     { href: "/developers", label: "Developer API", hint: "The same data as JSON over REST" },
   ] },
 ];
