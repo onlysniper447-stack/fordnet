@@ -206,17 +206,18 @@ export async function ingestIfDue(opts: IngestOptions & { maxAgeMs?: number; for
 }
 
 /** Never blocks a page/API response on the provider: refresh runs after the response is sent. */
+export const flushRpcUsage = () => flushUsage(async (key, n) => { // one cheap upsert per pool per instance per minute
+  const [r] = await (await getDb()).insert(schema.meta).values({ key, value: String(n) })
+    .onConflictDoUpdate({ target: schema.meta.key, set: { value: sql`(${schema.meta.value}::bigint + ${n})::text` } }).returning({ value: schema.meta.value });
+  return Number(r.value);
+});
+
 let nextCheckAt = 0; // per-instance: don't even read meta from the DB more than once a minute
 export async function ensureFresh(maxAgeMs = INGEST_INTERVAL_MS): Promise<void> {
   if (!dbAvailable()) return; // nowhere to store results
   if (Date.now() < nextCheckAt) return;
   nextCheckAt = Date.now() + 60_000;
-  const flush = () => flushUsage(async (key, n) => { // one cheap upsert per pool per instance per minute
-    const [r] = await (await getDb()).insert(schema.meta).values({ key, value: String(n) })
-      .onConflictDoUpdate({ target: schema.meta.key, set: { value: sql`(${schema.meta.value}::bigint + ${n})::text` } }).returning({ value: schema.meta.value });
-    return Number(r.value);
-  });
-  try { after(flush); } catch { void flush(); }
+  try { after(flushRpcUsage); } catch { void flushRpcUsage(); }
   try {
     after(() => ingestIfDue({ maxAgeMs }));
   } catch {
